@@ -1,0 +1,10 @@
+esp_peer.c is an independent UDP peer derived solely from esp.c
+(construct_esp_packet and esp_mainloop), esp-seqno.c (verify_packet_seqno),
+openssl-esp.c (encrypt_esp_packet and decrypt_esp_packet), and gpst.c
+(gpst_esp_send_probes and gpst_esp_catch_probe) in OpenConnect commit
+2035601b64a5360a46d18e08937e7f654b3230f2. It preserves the ESP-in-UDP
+framing, AES-CBC and truncated-HMAC suites, sequence-zero behavior,
+OpenSSL explicit-IV chain, and GlobalProtect ICMP echo exchange while using
+an independently generated explicit IV for each server packet.
+
+OpenConnect is licensed under LGPL-2.1-or-later.

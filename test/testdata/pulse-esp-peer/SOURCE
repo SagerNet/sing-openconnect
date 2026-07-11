@@ -1,0 +1,18 @@
+esp_peer.c is an independent Pulse/Juniper ESP UDP peer derived from the wire
+behavior documented by test/testdata/gp-esp-peer/esp_peer.c and by esp.c,
+openssl-esp.c, oncp.c, and lzo.c in OpenConnect commit
+2035601b64a5360a46d18e08937e7f654b3230f2.
+
+The source preserves ESP-in-UDP framing, AES-CBC, truncated HMAC-MD5/SHA1/
+SHA256 authentication, sequence-zero behavior, OpenConnect's chained explicit
+IV calculation, Pulse's one-zero-byte 4/41 probe exchange, next-header 5 for
+raw LZO1X-compressed IPv4, and ordinary IPv4/IPv6 ICMP echo semantics. It uses
+OpenSSL and liblzo2 as independent cryptographic and compression
+implementations.
+
+The peer's sequence-gap behavior models OpenConnect's stateful outbound CBC
+context: a failed transport write can consume both a sequence and the next IV,
+so the first later datagram is authenticated using its transmitted explicit IV
+and becomes the new chain anchor. New SAs still require sequence zero.
+
+OpenConnect is licensed under LGPL-2.1-or-later.

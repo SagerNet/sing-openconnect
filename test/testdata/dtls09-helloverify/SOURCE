@@ -1,0 +1,5 @@
+peer.c is an independent UDP peer derived solely from tests/bad_dtls_test.c in
+OpenConnect commit 2035601b64a5360a46d18e08937e7f654b3230f2. It preserves the
+Cisco DTLS1_BAD_VER 0x0100 wire contract, body-only handshake transcript,
+TLS 1.0 PRF, AES128-SHA record construction, and HelloVerify cookie exchange.
+OpenConnect is licensed under LGPL-2.1-or-later.
