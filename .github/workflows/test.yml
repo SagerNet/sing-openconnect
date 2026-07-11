@@ -1,0 +1,62 @@
+name: test
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version:
+          - '~1.26'
+          - '~1.25'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+
+      - name: Run unit tests
+        run: make test
+
+  interop:
+    name: interop
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: test/go.mod
+          cache: true
+
+      - name: Ensure TUN device
+        run: |
+          sudo mkdir -p /dev/net
+          if [ ! -e /dev/net/tun ]; then
+            sudo mknod /dev/net/tun c 10 200
+          fi
+          sudo chmod 0666 /dev/net/tun
+
+      - name: Run OpenConnect interop tests
+        working-directory: test
+        env:
+          OPENCONNECT_IT: "1"
+        run: go test -race -v -count=1 -timeout 50m ./...
