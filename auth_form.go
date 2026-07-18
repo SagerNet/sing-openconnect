@@ -3,6 +3,7 @@ package openconnect
 import (
 	"context"
 	"maps"
+	"net/http"
 	"slices"
 	"strconv"
 	"sync/atomic"
@@ -25,13 +26,17 @@ const (
 	authCacheAuthGroup = "auth-group"
 )
 
-type AuthForm struct {
+type AuthChallenge struct {
 	ID      string
 	Banner  string
 	Message string
 	Error   string
-	URL     string
-	Fields  []AuthFormField
+	Form    *AuthForm
+	Browser *BrowserRequest
+}
+
+type AuthForm struct {
+	Fields []AuthFormField
 }
 
 type AuthFormField struct {
@@ -48,18 +53,44 @@ type AuthFormChoice struct {
 	Label string
 }
 
-type authFormRequest struct {
+type BrowserRequest struct {
+	URL         string
+	FinalURL    string
+	CookieNames []string
+	HeaderNames []string
+}
+
+type BrowserCookie struct {
+	Name  string
+	Value string
+}
+
+type BrowserResult struct {
+	FinalURL string
+	Cookies  []BrowserCookie
+	Header   http.Header
+}
+
+type AuthResponse struct {
+	Form    *AuthFormResponse
+	Browser *BrowserResult
+}
+
+type AuthFormResponse struct {
+	Values map[string]string
+}
+
+type authenticationRequest struct {
 	FormID         string
 	Banner         string
 	Message        string
 	Error          string
-	URL            string
-	Browser        BrowserRequest
-	Fields         []authFormRequestField
+	Browser        *BrowserRequest
+	Fields         []authenticationRequestField
 	ClearCacheKeys []string
 }
 
-type authFormRequestField struct {
+type authenticationRequestField struct {
 	SubmissionKey string
 	Name          string
 	Label         string
@@ -70,89 +101,84 @@ type authFormRequestField struct {
 	Automatic     func(ctx context.Context) (string, error)
 }
 
-type authFormResponse struct {
+type authenticationResponse struct {
 	Values        map[string]string
 	BrowserResult *BrowserResult
 }
 
-type browserAuthenticationResponse struct {
-	result BrowserResult
-	err    error
+type pendingAuthChallengeState struct {
+	challenge AuthChallenge
+	validate  func(response AuthResponse) error
+	complete  func(response AuthResponse)
+	cancel    func() error
+	canceled  atomic.Bool
 }
 
-type pendingAuthFormState struct {
-	form     AuthForm
-	validate func(values map[string]string) error
-	complete func(values map[string]string)
-	cancel   func() error
-	canceled atomic.Bool
+var authChallengeIdentifier atomic.Uint64
+
+func newAuthChallengeID() string {
+	return strconv.FormatUint(authChallengeIdentifier.Add(1), 10)
 }
 
-var authFormIdentifier atomic.Uint64
-
-func newAuthFormID() string {
-	return strconv.FormatUint(authFormIdentifier.Add(1), 10)
-}
-
-func (c *Client) PendingAuthForm() *AuthForm {
-	c.authFormAccess.Lock()
-	defer c.authFormAccess.Unlock()
-	if c.pendingAuthForm == nil {
+func (c *Client) PendingAuthChallenge() *AuthChallenge {
+	c.authChallengeAccess.Lock()
+	defer c.authChallengeAccess.Unlock()
+	if c.pendingAuthChallenge == nil {
 		return nil
 	}
-	form := cloneAuthForm(c.pendingAuthForm.form)
-	return &form
+	challenge := cloneAuthChallenge(c.pendingAuthChallenge.challenge)
+	return &challenge
 }
 
-func (c *Client) AuthFormUpdated() <-chan struct{} {
-	c.authFormAccess.Lock()
-	defer c.authFormAccess.Unlock()
-	return c.authFormUpdated
+func (c *Client) AuthChallengeUpdated() <-chan struct{} {
+	c.authChallengeAccess.Lock()
+	defer c.authChallengeAccess.Unlock()
+	return c.authChallengeUpdated
 }
 
-func (c *Client) CompleteAuthForm(id string, values map[string]string) error {
-	responseValues := cloneStringMap(values)
-	c.authFormAccess.Lock()
-	pending := c.pendingAuthForm
-	if pending == nil || pending.form.ID != id {
-		c.authFormAccess.Unlock()
-		return ErrNoPendingAuthForm
+func (c *Client) CompleteAuthChallenge(id string, response AuthResponse) error {
+	response = cloneAuthResponse(response)
+	c.authChallengeAccess.Lock()
+	pending := c.pendingAuthChallenge
+	if pending == nil || pending.challenge.ID != id {
+		c.authChallengeAccess.Unlock()
+		return ErrNoPendingAuthChallenge
 	}
 	if pending.complete == nil {
-		c.authFormAccess.Unlock()
-		return ErrAuthFormNotAnswerable
+		c.authChallengeAccess.Unlock()
+		return ErrAuthChallengeNotAnswerable
 	}
 	validate := pending.validate
-	c.authFormAccess.Unlock()
+	c.authChallengeAccess.Unlock()
 	if validate != nil {
-		err := validate(responseValues)
+		err := validate(response)
 		if err != nil {
 			return err
 		}
 	}
-	c.authFormAccess.Lock()
-	if c.pendingAuthForm != pending || pending.form.ID != id {
-		c.authFormAccess.Unlock()
-		return ErrNoPendingAuthForm
+	c.authChallengeAccess.Lock()
+	if c.pendingAuthChallenge != pending || pending.challenge.ID != id {
+		c.authChallengeAccess.Unlock()
+		return ErrNoPendingAuthChallenge
 	}
-	c.pendingAuthForm = nil
-	c.signalAuthFormUpdatedLocked()
-	c.authFormAccess.Unlock()
-	pending.complete(responseValues)
+	c.pendingAuthChallenge = nil
+	c.signalAuthChallengeUpdatedLocked()
+	c.authChallengeAccess.Unlock()
+	pending.complete(response)
 	return nil
 }
 
-func (c *Client) CancelAuthForm(id string) error {
-	c.authFormAccess.Lock()
-	pending := c.pendingAuthForm
-	if pending == nil || pending.form.ID != id {
-		c.authFormAccess.Unlock()
-		return ErrNoPendingAuthForm
+func (c *Client) CancelAuthChallenge(id string) error {
+	c.authChallengeAccess.Lock()
+	pending := c.pendingAuthChallenge
+	if pending == nil || pending.challenge.ID != id {
+		c.authChallengeAccess.Unlock()
+		return ErrNoPendingAuthChallenge
 	}
-	c.pendingAuthForm = nil
-	c.signalAuthFormUpdatedLocked()
-	c.authFormAccess.Unlock()
-	c.setTerminalError(ErrAuthFormCanceled)
+	c.pendingAuthChallenge = nil
+	c.signalAuthChallengeUpdatedLocked()
+	c.authChallengeAccess.Unlock()
+	c.setTerminalError(ErrAuthChallengeCanceled)
 	if pending.cancel != nil {
 		err := pending.cancel()
 		if err != nil {
@@ -162,7 +188,7 @@ func (c *Client) CancelAuthForm(id string) error {
 	return nil
 }
 
-func (c *Client) awaitAuthForm(ctx context.Context, request authFormRequest, continuation authContinuation) (authFormResponse, error) {
+func (c *Client) awaitAuthChallenge(ctx context.Context, request authenticationRequest, continuation authContinuation) (authenticationResponse, error) {
 	c.clearStableCredentials(request.ClearCacheKeys...)
 	values := make(map[string]string, len(request.Fields))
 	visibleFields := make([]AuthFormField, 0, len(request.Fields))
@@ -175,7 +201,7 @@ func (c *Client) awaitAuthForm(ctx context.Context, request authFormRequest, con
 		}
 		_, exists := seenKeys[field.SubmissionKey]
 		if exists {
-			return authFormResponse{}, markTerminal(E.New("duplicate openconnect authentication submission key: ", field.SubmissionKey))
+			return authenticationResponse{}, markTerminal(E.New("duplicate openconnect authentication submission key: ", field.SubmissionKey))
 		}
 		seenKeys[field.SubmissionKey] = struct{}{}
 		fieldValue, automatic := c.prefillAuthField(request.FormID, *field)
@@ -193,7 +219,7 @@ func (c *Client) awaitAuthForm(ctx context.Context, request authFormRequest, con
 			}
 		}
 		if field.Kind == authFormFieldToken && field.Automatic == nil && fieldValue == "" {
-			return authFormResponse{}, markTerminal(E.New("openconnect token field has no automatic token generator: ", field.Name))
+			return authenticationResponse{}, markTerminal(E.New("openconnect token field has no automatic token generator: ", field.Name))
 		}
 		if (field.Kind == authFormFieldHidden && !promote) || field.Kind == authFormFieldToken {
 			if field.Automatic == nil {
@@ -206,7 +232,7 @@ func (c *Client) awaitAuthForm(ctx context.Context, request authFormRequest, con
 			kind = AuthFormFieldText
 		}
 		if kind != AuthFormFieldText && kind != AuthFormFieldPassword && kind != AuthFormFieldSelect {
-			return authFormResponse{}, markTerminal(E.New("unsupported openconnect authentication field kind: ", kind))
+			return authenticationResponse{}, markTerminal(E.New("unsupported openconnect authentication field kind: ", kind))
 		}
 		if kind == AuthFormFieldSelect && automatic && !authFormChoiceContains(field.Options, fieldValue) {
 			automatic = false
@@ -239,92 +265,85 @@ func (c *Client) awaitAuthForm(ctx context.Context, request authFormRequest, con
 		}
 		return nil
 	}
-	if request.URL != "" {
-		if c.options.Browser == nil {
-			return authFormResponse{}, ErrBrowserAuthenticationUnsupported
-		}
-		browserContext, cancelBrowser := context.WithCancel(ctx)
-		state := &pendingAuthFormState{
-			form: AuthForm{
-				ID:      newAuthFormID(),
+	if request.Browser != nil {
+		responseChannel := make(chan AuthResponse, 1)
+		cancelChannel := make(chan struct{})
+		state := &pendingAuthChallengeState{
+			challenge: AuthChallenge{
+				ID:      newAuthChallengeID(),
 				Banner:  request.Banner,
 				Message: request.Message,
 				Error:   request.Error,
-				URL:     request.URL,
+				Browser: cloneBrowserRequest(request.Browser),
+			},
+			validate: func(response AuthResponse) error {
+				if response.Form != nil || response.Browser == nil {
+					return ErrInvalidAuthResponse
+				}
+				if response.Browser.FinalURL == "" && len(response.Browser.Cookies) == 0 && len(response.Browser.Header) == 0 {
+					return ErrInvalidBrowserAuthentication
+				}
+				return nil
+			},
+			complete: func(response AuthResponse) {
+				responseChannel <- response
 			},
 		}
 		state.cancel = func() error {
 			state.canceled.Store(true)
-			cancelBrowser()
+			close(cancelChannel)
 			return continuation.Close()
 		}
-		c.publishAuthForm(state)
-		browserRequest := request.Browser
-		if browserRequest.URL == "" {
-			browserRequest.URL = request.URL
-		}
-		browserRequest.CookieNames = append([]string(nil), browserRequest.CookieNames...)
-		browserRequest.HeaderNames = append([]string(nil), browserRequest.HeaderNames...)
-		resultChannel := make(chan browserAuthenticationResponse, 1)
-		go func() {
-			result, authenticateErr := c.options.Browser.Authenticate(browserContext, browserRequest)
-			resultChannel <- browserAuthenticationResponse{result: result, err: authenticateErr}
-		}()
-		var result BrowserResult
-		var err error
+		c.publishAuthChallenge(state)
 		select {
-		case response := <-resultChannel:
-			result = response.result
-			err = response.err
-		case <-browserContext.Done():
-			err = browserContext.Err()
-		}
-		browserContextErr := browserContext.Err()
-		c.clearAuthForm(state)
-		cancelBrowser()
-		if state.canceled.Load() {
-			return authFormResponse{}, ErrAuthFormCanceled
-		}
-		if err != nil {
-			if browserContextErr != nil && ctx.Err() == nil {
-				return authFormResponse{}, ErrAuthFormCanceled
+		case <-ctx.Done():
+			c.clearAuthChallenge(state)
+			return authenticationResponse{}, ctx.Err()
+		case <-cancelChannel:
+			return authenticationResponse{}, ErrAuthChallengeCanceled
+		case continuationErr, open := <-continuation.Done():
+			c.clearAuthChallenge(state)
+			if state.canceled.Load() {
+				return authenticationResponse{}, ErrAuthChallengeCanceled
 			}
-			return authFormResponse{}, err
+			if open && continuationErr != nil {
+				return authenticationResponse{}, continuationErr
+			}
+			return authenticationResponse{}, markTerminal(E.New("openconnect authentication continuation closed while a browser challenge was pending"))
+		case response := <-responseChannel:
+			err := evaluateAutomaticFields()
+			if err != nil {
+				return authenticationResponse{}, err
+			}
+			return authenticationResponse{Values: values, BrowserResult: response.Browser}, nil
 		}
-		if result.FinalURL == "" && len(result.Cookies) == 0 && len(result.Header) == 0 {
-			return authFormResponse{}, ErrInvalidBrowserAuthentication
-		}
-		result.Header = result.Header.Clone()
-		result.Cookies = append([]BrowserCookie(nil), result.Cookies...)
-		err = evaluateAutomaticFields()
-		if err != nil {
-			return authFormResponse{}, err
-		}
-		return authFormResponse{Values: values, BrowserResult: &result}, nil
 	}
 	if len(request.Fields) > 0 && (len(visibleFields) == 0 || allVisibleFieldsAutomatic) {
 		err := evaluateAutomaticFields()
 		if err != nil {
-			return authFormResponse{}, err
+			return authenticationResponse{}, err
 		}
-		return authFormResponse{Values: values}, nil
+		return authenticationResponse{Values: values}, nil
 	}
 	responseChannel := make(chan map[string]string, 1)
 	cancelChannel := make(chan struct{})
-	form := AuthForm{
-		ID:      newAuthFormID(),
+	challenge := AuthChallenge{
+		ID:      newAuthChallengeID(),
 		Banner:  request.Banner,
 		Message: request.Message,
 		Error:   request.Error,
-		Fields:  visibleFields,
+		Form:    &AuthForm{Fields: visibleFields},
 	}
-	state := &pendingAuthFormState{
-		form: form,
-		validate: func(responseValues map[string]string) error {
-			return validateAuthFormValues(visibleFields, responseValues)
+	state := &pendingAuthChallengeState{
+		challenge: challenge,
+		validate: func(response AuthResponse) error {
+			if response.Form == nil || response.Browser != nil {
+				return ErrInvalidAuthResponse
+			}
+			return validateAuthFormValues(visibleFields, response.Form.Values)
 		},
-		complete: func(responseValues map[string]string) {
-			responseChannel <- responseValues
+		complete: func(response AuthResponse) {
+			responseChannel <- response.Form.Values
 		},
 	}
 	state.cancel = func() error {
@@ -332,22 +351,22 @@ func (c *Client) awaitAuthForm(ctx context.Context, request authFormRequest, con
 		close(cancelChannel)
 		return continuation.Close()
 	}
-	c.publishAuthForm(state)
+	c.publishAuthChallenge(state)
 	select {
 	case <-ctx.Done():
-		c.clearAuthForm(state)
-		return authFormResponse{}, ctx.Err()
+		c.clearAuthChallenge(state)
+		return authenticationResponse{}, ctx.Err()
 	case <-cancelChannel:
-		return authFormResponse{}, ErrAuthFormCanceled
+		return authenticationResponse{}, ErrAuthChallengeCanceled
 	case continuationErr, open := <-continuation.Done():
-		c.clearAuthForm(state)
+		c.clearAuthChallenge(state)
 		if state.canceled.Load() {
-			return authFormResponse{}, ErrAuthFormCanceled
+			return authenticationResponse{}, ErrAuthChallengeCanceled
 		}
 		if open && continuationErr != nil {
-			return authFormResponse{}, continuationErr
+			return authenticationResponse{}, continuationErr
 		}
-		return authFormResponse{}, markTerminal(E.New("openconnect authentication continuation closed while a form was pending"))
+		return authenticationResponse{}, markTerminal(E.New("openconnect authentication continuation closed while a form was pending"))
 	case responseValues := <-responseChannel:
 		for _, field := range request.Fields {
 			value, exists := responseValues[field.SubmissionKey]
@@ -361,21 +380,21 @@ func (c *Client) awaitAuthForm(ctx context.Context, request authFormRequest, con
 		}
 		err := evaluateAutomaticFields()
 		if err != nil {
-			return authFormResponse{}, err
+			return authenticationResponse{}, err
 		}
-		return authFormResponse{Values: values}, nil
+		return authenticationResponse{Values: values}, nil
 	}
 }
 
-func (c *Client) prefillAuthField(formID string, field authFormRequestField) (string, bool) {
+func (c *Client) prefillAuthField(formID string, field authenticationRequestField) (string, bool) {
 	entry, loaded := c.formEntry(formID, field.SubmissionKey, field.Name)
 	if loaded && !entry.Promote {
 		return entry.Value, true
 	}
 	if field.CacheKey != "" {
-		c.authFormAccess.Lock()
+		c.authChallengeAccess.Lock()
 		value, exists := c.stableCredentials[field.CacheKey]
-		c.authFormAccess.Unlock()
+		c.authChallengeAccess.Unlock()
 		if exists {
 			return value, true
 		}
@@ -398,49 +417,79 @@ func (c *Client) formEntry(formID string, submissionKey string, name string) (Fo
 }
 
 func (c *Client) storeStableCredential(key string, value string) {
-	c.authFormAccess.Lock()
+	c.authChallengeAccess.Lock()
 	c.stableCredentials[key] = value
-	c.authFormAccess.Unlock()
+	c.authChallengeAccess.Unlock()
 }
 
 func (c *Client) clearStableCredentials(keys ...string) {
 	if len(keys) == 0 {
 		return
 	}
-	c.authFormAccess.Lock()
+	c.authChallengeAccess.Lock()
 	for _, key := range keys {
 		delete(c.stableCredentials, key)
 	}
-	c.authFormAccess.Unlock()
+	c.authChallengeAccess.Unlock()
 }
 
-func (c *Client) publishAuthForm(state *pendingAuthFormState) {
-	c.authFormAccess.Lock()
-	c.pendingAuthForm = state
-	c.signalAuthFormUpdatedLocked()
-	c.authFormAccess.Unlock()
+func (c *Client) publishAuthChallenge(state *pendingAuthChallengeState) {
+	c.authChallengeAccess.Lock()
+	c.pendingAuthChallenge = state
+	c.signalAuthChallengeUpdatedLocked()
+	c.authChallengeAccess.Unlock()
 }
 
-func (c *Client) clearAuthForm(state *pendingAuthFormState) {
-	c.authFormAccess.Lock()
-	if c.pendingAuthForm == state {
-		c.pendingAuthForm = nil
-		c.signalAuthFormUpdatedLocked()
+func (c *Client) clearAuthChallenge(state *pendingAuthChallengeState) {
+	c.authChallengeAccess.Lock()
+	if c.pendingAuthChallenge == state {
+		c.pendingAuthChallenge = nil
+		c.signalAuthChallengeUpdatedLocked()
 	}
-	c.authFormAccess.Unlock()
+	c.authChallengeAccess.Unlock()
 }
 
-func (c *Client) signalAuthFormUpdatedLocked() {
-	close(c.authFormUpdated)
-	c.authFormUpdated = make(chan struct{})
+func (c *Client) signalAuthChallengeUpdatedLocked() {
+	close(c.authChallengeUpdated)
+	c.authChallengeUpdated = make(chan struct{})
 }
 
-func cloneAuthForm(form AuthForm) AuthForm {
-	form.Fields = append([]AuthFormField(nil), form.Fields...)
-	for i := range form.Fields {
-		form.Fields[i].Options = append([]AuthFormChoice(nil), form.Fields[i].Options...)
+func cloneAuthChallenge(challenge AuthChallenge) AuthChallenge {
+	if challenge.Form != nil {
+		form := *challenge.Form
+		form.Fields = append([]AuthFormField(nil), form.Fields...)
+		for i := range form.Fields {
+			form.Fields[i].Options = append([]AuthFormChoice(nil), form.Fields[i].Options...)
+		}
+		challenge.Form = &form
 	}
-	return form
+	challenge.Browser = cloneBrowserRequest(challenge.Browser)
+	return challenge
+}
+
+func cloneBrowserRequest(request *BrowserRequest) *BrowserRequest {
+	if request == nil {
+		return nil
+	}
+	cloned := *request
+	cloned.CookieNames = append([]string(nil), request.CookieNames...)
+	cloned.HeaderNames = append([]string(nil), request.HeaderNames...)
+	return &cloned
+}
+
+func cloneAuthResponse(response AuthResponse) AuthResponse {
+	if response.Form != nil {
+		form := *response.Form
+		form.Values = cloneStringMap(form.Values)
+		response.Form = &form
+	}
+	if response.Browser != nil {
+		browser := *response.Browser
+		browser.Cookies = append([]BrowserCookie(nil), browser.Cookies...)
+		browser.Header = browser.Header.Clone()
+		response.Browser = &browser
+	}
+	return response
 }
 
 func validateAuthFormValues(fields []AuthFormField, values map[string]string) error {

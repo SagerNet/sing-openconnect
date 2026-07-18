@@ -2415,10 +2415,10 @@ func waitForM2GPReady(t *testing.T, ctx context.Context, client *openconnect.Cli
 	for !client.Ready() {
 		select {
 		case <-ctx.Done():
-			t.Fatalf("wait for GlobalProtect M2 client readiness: %v peer=%#v form=%#v", ctx.Err(), peer.snapshot(), client.PendingAuthForm())
+			t.Fatalf("wait for GlobalProtect M2 client readiness: %v peer=%#v form=%#v", ctx.Err(), peer.snapshot(), client.PendingAuthChallenge())
 		case peerErr := <-peer.failures:
 			t.Fatal(peerErr)
-		case <-client.AuthFormUpdated():
+		case <-client.AuthChallengeUpdated():
 		case <-time.After(10 * time.Millisecond):
 		}
 	}

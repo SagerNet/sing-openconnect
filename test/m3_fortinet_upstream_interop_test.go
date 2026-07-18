@@ -239,7 +239,7 @@ func runM3FortinetFakeCase(
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if form := client.PendingAuthForm(); form != nil {
+		if form := client.PendingAuthChallenge(); form != nil {
 			t.Fatalf("fixed fake Fortinet unexpectedly required interactive input: %#v", form)
 		}
 		select {

@@ -277,11 +277,11 @@ func TestM3F5AuthenticationNon2xxIsTerminal(t *testing.T) {
 			"F5 authentication 401 was not a status-specific terminal protocol error: %v; dials=%d pending=%#v logs:\n%s",
 			terminalErr,
 			dialer.hostnameDials.Load(),
-			client.PendingAuthForm(),
+			client.PendingAuthChallenge(),
 			m3F5PeerLogs(t, ctx, peer),
 		)
 	}
-	if client.Ready() || client.PendingAuthForm() != nil {
+	if client.Ready() || client.PendingAuthChallenge() != nil {
 		t.Fatal("F5 authentication 401 left a ready session or repeated credential form")
 	}
 	waitM3F5PeerMarker(t, ctx, peer, "F5_PEER_AUTH_REJECTED_401_1", 5*time.Second)
@@ -538,7 +538,7 @@ func waitM3F5ConfigurationEvent(
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if form := client.PendingAuthForm(); form != nil {
+		if form := client.PendingAuthChallenge(); form != nil {
 			t.Fatalf("independent F5 peer unexpectedly required interactive authentication: %#v", form)
 		}
 		select {

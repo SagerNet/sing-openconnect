@@ -32,11 +32,6 @@ import (
 	"golang.org/x/net/publicsuffix"
 )
 
-const (
-	anyConnectHostScanMaximumBody   = 8 * 1024 * 1024
-	anyConnectHostScanMaximumFields = 4096
-)
-
 type anyConnectHostScanResponse struct {
 	statusCode int
 	body       []byte
@@ -256,9 +251,6 @@ func (a *anyConnectAuthentication) fetchAnyConnectHostScanData(ctx context.Conte
 		}
 		return nil, nil
 	}
-	if len(dataDocument.Fields) > anyConnectHostScanMaximumFields {
-		return nil, markTerminal(E.New("AnyConnect CSD data response exceeds ", anyConnectHostScanMaximumFields, " requested fields"))
-	}
 	fields := make([]anyConnectHostScanRequestedField, 0, len(dataDocument.Fields))
 	for _, dataField := range dataDocument.Fields {
 		field, parseErr := parseAnyConnectHostScanRequestedField(dataField.Value)
@@ -309,16 +301,13 @@ func (a *anyConnectAuthentication) doAnyConnectHostScanRequest(
 		}
 		return anyConnectHostScanResponse{}, E.Cause(err, "send AnyConnect CSD request")
 	}
-	responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, anyConnectHostScanMaximumBody+1))
+	responseBody, readErr := io.ReadAll(response.Body)
 	closeErr := response.Body.Close()
 	if readErr != nil {
 		return anyConnectHostScanResponse{}, E.Errors(E.Cause(readErr, "read AnyConnect CSD response"), closeErr)
 	}
 	if closeErr != nil {
 		return anyConnectHostScanResponse{}, E.Cause(closeErr, "close AnyConnect CSD response")
-	}
-	if len(responseBody) > anyConnectHostScanMaximumBody {
-		return anyConnectHostScanResponse{}, markTerminal(E.New("AnyConnect CSD response exceeds ", anyConnectHostScanMaximumBody, " bytes"))
 	}
 	return anyConnectHostScanResponse{statusCode: response.StatusCode, body: responseBody}, nil
 }
@@ -354,13 +343,7 @@ func (a *anyConnectAuthentication) pollAnyConnectHostScanWait(ctx context.Contex
 // Upstream run_csd_script invokes the configured wrapper directly with an empty downloaded-stub argument, quoted legacy option values, CSD_SHA256/CSD_TOKEN/CSD_HOSTNAME, and ignores only a started wrapper's non-zero exit status.
 func (a *anyConnectAuthentication) runAnyConnectHostScanWrapper(ctx context.Context, baseURL *url.URL) error {
 	wrapperPath := a.frontend.client.options.CSD.WrapperPath
-	wrapperInfo, err := os.Stat(wrapperPath)
-	if err != nil {
-		return markTerminal(E.Cause(err, "inspect AnyConnect CSD wrapper"))
-	}
-	if !wrapperInfo.Mode().IsRegular() {
-		return markTerminal(E.New("AnyConnect CSD wrapper is not a regular file: ", wrapperPath))
-	}
+	var err error
 	serverCertificate := a.peerCertificate
 	if serverCertificate == nil {
 		serverCertificate, err = a.probeAnyConnectHostScanCertificate(ctx, a.currentURL)
@@ -483,7 +466,7 @@ func resolveAnyConnectHostScanURL(baseURL *url.URL, reference string) (*url.URL,
 }
 
 func validateAnyConnectHostScanURL(targetURL *url.URL) error {
-	if targetURL == nil || targetURL.Scheme != "https" || targetURL.Hostname() == "" || targetURL.User != nil {
+	if targetURL == nil || targetURL.Scheme != "https" || targetURL.Hostname() == "" {
 		if targetURL == nil {
 			return markTerminal(E.New("AnyConnect CSD URL is empty"))
 		}
@@ -509,10 +492,6 @@ func setAnyConnectHostScanCookie(jar http.CookieJar, targetURL *url.URL, token s
 		Path:     "/",
 		Secure:   true,
 		HttpOnly: true,
-	}
-	err := cookie.Valid()
-	if err != nil {
-		return markTerminal(E.Cause(err, "validate AnyConnect CSD sdesktop cookie"))
 	}
 	jar.SetCookies(targetURL, []*http.Cookie{cookie})
 	return nil
@@ -660,12 +639,6 @@ func buildAnyConnectHostScanReport(
 				logger.WarnContext(logContext, "ignored unsupported AnyConnect CSD field kind ", field.Kind, " for ", field.Name)
 			}
 		}
-		if report.Len() > anyConnectHostScanMaximumBody {
-			return nil, markTerminal(E.New("AnyConnect CSD report exceeds ", anyConnectHostScanMaximumBody, " bytes"))
-		}
-	}
-	if report.Len() > anyConnectHostScanMaximumBody {
-		return nil, markTerminal(E.New("AnyConnect CSD report exceeds ", anyConnectHostScanMaximumBody, " bytes"))
 	}
 	return []byte(report.String()), nil
 }

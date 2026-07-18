@@ -85,11 +85,6 @@ type m2GPAuthPeerDialer struct {
 	pinnedDialsAfterTunnel   uint64
 }
 
-type m2GPHeaderBrowser struct {
-	expectedURL string
-	cookieName  string
-}
-
 type m2GPRawHTTPSServer struct {
 	listener    net.Listener
 	handler     http.Handler
@@ -201,12 +196,6 @@ func runM2GPAuthPeerScenario(t *testing.T, scenario m2GPAuthPeerScenario) {
 			CertificateAuthority: openconnect.Material{Content: rootCertificate},
 		},
 	}
-	if scenario.samlMethod != "" {
-		options.Browser = &m2GPHeaderBrowser{
-			expectedURL: peer.expectedBrowserURL,
-			cookieName:  scenario.samlCookieHeader,
-		}
-	}
 	client, err := openconnect.NewClient(options)
 	if err != nil {
 		t.Fatal(E.Cause(err, "create GlobalProtect authentication peer client"))
@@ -223,16 +212,32 @@ func runM2GPAuthPeerScenario(t *testing.T, scenario m2GPAuthPeerScenario) {
 		_, readErr := client.ReadDataPacket(ctx)
 		terminalErrors <- readErr
 	}()
+	if scenario.samlMethod != "" {
+		challenge := waitForM2GPAuthPeerForm(t, ctx, client, peer.errors, terminalErrors)
+		if challenge.Form != nil || challenge.Browser == nil || challenge.Browser.URL != peer.expectedBrowserURL || len(challenge.Browser.HeaderNames) != 3 {
+			t.Fatalf("GlobalProtect browser challenge omitted the SAML URL or completion headers: %#v", challenge)
+		}
+		err = client.CompleteAuthChallenge(challenge.ID, openconnect.AuthResponse{Browser: &openconnect.BrowserResult{
+			FinalURL: "https://identity.invalid/complete",
+			Header: http.Header{
+				"sAmL-UsErNaMe":           []string{m2GPAuthPeerBrowserUser},
+				scenario.samlCookieHeader: []string{m2GPAuthPeerBrowserToken},
+			},
+		}})
+		if err != nil {
+			t.Fatal(E.Cause(err, "complete GlobalProtect browser challenge"))
+		}
+	}
 	if scenario.selectedLabel != "" {
 		form := waitForM2GPAuthPeerForm(t, ctx, client, peer.errors, terminalErrors)
-		if form.Message != "Please select GlobalProtect gateway." || len(form.Fields) != 1 || len(form.Fields[0].Options) != 2 {
+		if form.Browser != nil || form.Form == nil || form.Message != "Please select GlobalProtect gateway." || len(form.Form.Fields) != 1 || len(form.Form.Fields[0].Options) != 2 {
 			t.Fatalf("GlobalProtect gateway selection form is incomplete: %#v", form)
 		}
-		if form.Fields[0].Options[0].Label != "regional-first" || form.Fields[0].Options[1].Label != "selected-gateway" {
-			t.Fatalf("GlobalProtect region priority did not order gateways: %#v", form.Fields[0].Options)
+		if form.Form.Fields[0].Options[0].Label != "regional-first" || form.Form.Fields[0].Options[1].Label != "selected-gateway" {
+			t.Fatalf("GlobalProtect region priority did not order gateways: %#v", form.Form.Fields[0].Options)
 		}
 		selection := ""
-		for _, option := range form.Fields[0].Options {
+		for _, option := range form.Form.Fields[0].Options {
 			if option.Label == scenario.selectedLabel {
 				selection = option.Value
 				break
@@ -241,7 +246,7 @@ func runM2GPAuthPeerScenario(t *testing.T, scenario m2GPAuthPeerScenario) {
 		if selection == "" {
 			t.Fatal("GlobalProtect gateway selection form omitted the requested gateway")
 		}
-		err = client.CompleteAuthForm(form.ID, map[string]string{form.Fields[0].SubmissionKey: selection})
+		err = client.CompleteAuthChallenge(form.ID, openconnect.AuthResponse{Form: &openconnect.AuthFormResponse{Values: map[string]string{form.Form.Fields[0].SubmissionKey: selection}}})
 		if err != nil {
 			t.Fatal(E.Cause(err, "complete GlobalProtect gateway selection form"))
 		}
@@ -642,27 +647,6 @@ func (p *m2GPAuthPeer) signal(event string) {
 	}
 }
 
-func (b *m2GPHeaderBrowser) Authenticate(
-	ctx context.Context,
-	request openconnect.BrowserRequest,
-) (openconnect.BrowserResult, error) {
-	select {
-	case <-ctx.Done():
-		return openconnect.BrowserResult{}, ctx.Err()
-	default:
-	}
-	if request.URL != b.expectedURL || len(request.HeaderNames) != 3 {
-		return openconnect.BrowserResult{}, E.New("GlobalProtect BrowserRequest omitted the SAML URL or completion headers")
-	}
-	return openconnect.BrowserResult{
-		FinalURL: "https://identity.invalid/complete",
-		Header: http.Header{
-			"sAmL-UsErNaMe": []string{m2GPAuthPeerBrowserUser},
-			b.cookieName:    []string{m2GPAuthPeerBrowserToken},
-		},
-	}, nil
-}
-
 func (d *m2GPAuthPeerDialer) DialContext(
 	ctx context.Context,
 	network string,
@@ -724,14 +708,14 @@ func waitForM2GPAuthPeerForm(
 	client *openconnect.Client,
 	peerErrors <-chan error,
 	terminalErrors <-chan error,
-) *openconnect.AuthForm {
+) *openconnect.AuthChallenge {
 	t.Helper()
 	for {
-		form := client.PendingAuthForm()
+		form := client.PendingAuthChallenge()
 		if form != nil {
 			return form
 		}
-		updated := client.AuthFormUpdated()
+		updated := client.AuthChallengeUpdated()
 		select {
 		case <-ctx.Done():
 			t.Fatal(E.Cause(ctx.Err(), "wait for GlobalProtect gateway selection form"))

@@ -3,7 +3,6 @@ package openconnect
 import (
 	"context"
 	"crypto/tls"
-	"net/http"
 
 	"github.com/sagernet/sing/common/logger"
 	N "github.com/sagernet/sing/common/network"
@@ -60,28 +59,6 @@ type ClientTLSOptions struct {
 	MCAKeyPassword       string
 }
 
-type BrowserRequest struct {
-	URL         string
-	FinalURL    string
-	CookieNames []string
-	HeaderNames []string
-}
-
-type BrowserCookie struct {
-	Name  string
-	Value string
-}
-
-type BrowserResult struct {
-	FinalURL string
-	Cookies  []BrowserCookie
-	Header   http.Header
-}
-
-type Browser interface {
-	Authenticate(ctx context.Context, request BrowserRequest) (BrowserResult, error)
-}
-
 type ClientOptions struct {
 	Context               context.Context
 	Server                string
@@ -99,7 +76,6 @@ type ClientOptions struct {
 	AllowInsecureCrypto   bool
 	TLSConfig             ClientTLSOptions
 	FormEntries           []FormEntry
-	Browser               Browser
 	Dialer                N.Dialer
 	Logger                logger.ContextLogger
 	OnTunnelConfiguration func(event TunnelConfigurationEvent) error

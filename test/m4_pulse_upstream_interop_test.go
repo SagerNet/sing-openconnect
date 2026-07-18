@@ -289,7 +289,7 @@ func runM4PulseUpstreamCase(
 	readinessTicker := time.NewTicker(10 * time.Millisecond)
 	defer readinessTicker.Stop()
 	for !client.Ready() {
-		pendingForm := client.PendingAuthForm()
+		pendingForm := client.PendingAuthChallenge()
 		if pendingForm != nil {
 			t.Fatalf("upstream Pulse fake unexpectedly required interactive input: %#v", pendingForm)
 		}
@@ -299,7 +299,7 @@ func runM4PulseUpstreamCase(
 				t.Fatal(E.Cause(readResult.err, "upstream Pulse fake client became terminal before readiness"))
 			}
 			t.Fatal("upstream Pulse fake sent a data packet before tunnel readiness")
-		case <-client.AuthFormUpdated():
+		case <-client.AuthChallengeUpdated():
 		case <-readinessTicker.C:
 		case <-caseContext.Done():
 			t.Fatalf("wait for upstream Pulse fake tunnel: %v: %s", caseContext.Err(), fixture.standardError.String())

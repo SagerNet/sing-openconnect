@@ -25,7 +25,7 @@ type flavorFrontend interface {
 }
 
 type authContinuation interface {
-	Advance(ctx context.Context, response *authFormResponse) (obtainedSession, *authFormRequest, error)
+	Advance(ctx context.Context, response *authenticationResponse) (obtainedSession, *authenticationRequest, error)
 	Done() <-chan error
 	Close() error
 }

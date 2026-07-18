@@ -213,12 +213,12 @@ func (a *ncAuthentication) Close() error {
 
 func (a *ncAuthentication) Advance(
 	ctx context.Context,
-	response *authFormResponse,
-) (obtainedSession, *authFormRequest, error) {
+	response *authenticationResponse,
+) (obtainedSession, *authenticationRequest, error) {
 	a.access.Lock()
 	if a.closed {
 		a.access.Unlock()
-		return nil, nil, ErrAuthFormCanceled
+		return nil, nil, ErrAuthChallengeCanceled
 	}
 	if a.initializationErr != nil {
 		initializationErr := a.initializationErr
@@ -309,7 +309,7 @@ func (a *ncAuthentication) doAuthenticationExchange(
 	method string,
 	requestURL *url.URL,
 	encodedForm string,
-) (obtainedSession, *authFormRequest, error) {
+) (obtainedSession, *authenticationRequest, error) {
 	currentMethod := method
 	currentURL := cloneNCURL(requestURL)
 	currentBody := encodedForm
@@ -547,7 +547,7 @@ func validateNCAuthenticationForm(form *ncAuthenticationForm) error {
 	}
 }
 
-func (a *ncAuthentication) authenticationRequestFromForm(form *ncAuthenticationForm) *authFormRequest {
+func (a *ncAuthentication) authenticationRequestFromForm(form *ncAuthenticationForm) *authenticationRequest {
 	primaryForm := ncPrimaryAuthenticationForm(form)
 	a.access.Lock()
 	repeatedPrimary := a.primaryPasswordSent && primaryForm
@@ -557,7 +557,7 @@ func (a *ncAuthentication) authenticationRequestFromForm(form *ncAuthenticationF
 	}
 	a.currentFormPrimary = firstPrimary || repeatedPrimary
 	a.access.Unlock()
-	request := &authFormRequest{
+	request := &authenticationRequest{
 		FormID:  form.id,
 		Banner:  form.banner,
 		Message: form.message,
@@ -570,7 +570,7 @@ func (a *ncAuthentication) authenticationRequestFromForm(form *ncAuthenticationF
 	tokenMessage := strings.TrimSpace(form.banner + " " + form.message)
 	for fieldIndex := range form.fields {
 		field := &form.fields[fieldIndex]
-		requestField := authFormRequestField{
+		requestField := authenticationRequestField{
 			SubmissionKey: field.submissionKey,
 			Name:          field.name,
 			Label:         field.label,
@@ -632,10 +632,10 @@ func ncTokenPasswordField(formIdentifier string, passwordNumber int) bool {
 	}
 }
 
-func (a *ncAuthentication) normalizeConfiguredAuthGroup(field *authFormRequestField) {
-	a.frontend.client.authFormAccess.Lock()
+func (a *ncAuthentication) normalizeConfiguredAuthGroup(field *authenticationRequestField) {
+	a.frontend.client.authChallengeAccess.Lock()
 	configuredGroup := a.frontend.client.stableCredentials[authCacheAuthGroup]
-	a.frontend.client.authFormAccess.Unlock()
+	a.frontend.client.authChallengeAccess.Unlock()
 	if configuredGroup == "" {
 		return
 	}
@@ -648,7 +648,7 @@ func (a *ncAuthentication) normalizeConfiguredAuthGroup(field *authFormRequestFi
 	a.frontend.client.clearStableCredentials(authCacheAuthGroup)
 }
 
-func encodeNCAuthenticationResponse(form *ncAuthenticationForm, response *authFormResponse) (string, error) {
+func encodeNCAuthenticationResponse(form *ncAuthenticationForm, response *authenticationResponse) (string, error) {
 	var encoded strings.Builder
 	for fieldIndex, field := range form.fields {
 		value, loaded := response.Values[field.submissionKey]

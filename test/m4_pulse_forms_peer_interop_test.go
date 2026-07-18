@@ -63,14 +63,14 @@ func TestM4PulseIndependentAuthenticationForms(t *testing.T) {
 	}
 	answeredForms := make(map[string]bool)
 	for !client.Ready() {
-		formUpdated := client.AuthFormUpdated()
+		formUpdated := client.AuthChallengeUpdated()
 		select {
 		case <-ctx.Done():
 			t.Fatal(E.Cause(ctx.Err(), "wait for Pulse authentication forms"))
 		case peerErr := <-peer.failures:
 			t.Fatal(peerErr)
 		case <-formUpdated:
-			form := client.PendingAuthForm()
+			form := client.PendingAuthChallenge()
 			if form == nil {
 				continue
 			}
@@ -79,7 +79,7 @@ func TestM4PulseIndependentAuthenticationForms(t *testing.T) {
 				t.Fatal("Pulse published a duplicate authentication form: ", formKind)
 			}
 			answeredForms[formKind] = true
-			err = client.CompleteAuthForm(form.ID, values)
+			err = client.CompleteAuthChallenge(form.ID, openconnect.AuthResponse{Form: &openconnect.AuthFormResponse{Values: values}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -168,18 +168,21 @@ func TestM4PulseHostCheckerFailsTowardNC(t *testing.T) {
 	}
 }
 
-func answerM4PulseForm(t *testing.T, form *openconnect.AuthForm) (string, map[string]string) {
+func answerM4PulseForm(t *testing.T, form *openconnect.AuthChallenge) (string, map[string]string) {
 	t.Helper()
-	values := make(map[string]string, len(form.Fields))
+	if form.Browser != nil || form.Form == nil {
+		t.Fatalf("Pulse published a non-form authentication challenge: %#v", form)
+	}
+	values := make(map[string]string, len(form.Form.Fields))
 	formKind := ""
-	if len(form.Fields) == 3 && form.Fields[0].Name == "oldpass" {
+	if len(form.Form.Fields) == 3 && form.Form.Fields[0].Name == "oldpass" {
 		formKind = "password-change"
-		if form.Fields[1].Name != "newpass1" || form.Fields[2].Name != "newpass1" ||
-			form.Fields[1].SubmissionKey == form.Fields[2].SubmissionKey {
+		if form.Form.Fields[1].Name != "newpass1" || form.Form.Fields[2].Name != "newpass1" ||
+			form.Form.Fields[1].SubmissionKey == form.Form.Fields[2].SubmissionKey {
 			t.Fatal("Pulse password-change form did not preserve duplicate wire names with distinct submission keys")
 		}
 	}
-	for index, field := range form.Fields {
+	for index, field := range form.Form.Fields {
 		switch field.Name {
 		case "realm":
 			formKind = "realm-entry"

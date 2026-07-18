@@ -286,7 +286,7 @@ func runM2GPFakeCase(
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if form := client.PendingAuthForm(); form != nil {
+		if form := client.PendingAuthChallenge(); form != nil {
 			t.Fatalf("fake GlobalProtect case unexpectedly required interactive input: %#v", form)
 		}
 		select {

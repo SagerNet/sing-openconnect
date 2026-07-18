@@ -238,7 +238,7 @@ func runM3F5FakeCase(
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if form := client.PendingAuthForm(); form != nil {
+		if form := client.PendingAuthChallenge(); form != nil {
 			t.Fatalf("fixed fake F5 unexpectedly required interactive input: %#v", form)
 		}
 		select {

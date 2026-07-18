@@ -258,12 +258,12 @@ func (a *gpAuthentication) Close() error {
 
 func (a *gpAuthentication) Advance(
 	ctx context.Context,
-	response *authFormResponse,
-) (obtainedSession, *authFormRequest, error) {
+	response *authenticationResponse,
+) (obtainedSession, *authenticationRequest, error) {
 	a.access.Lock()
 	if a.closed {
 		a.access.Unlock()
-		return nil, nil, ErrAuthFormCanceled
+		return nil, nil, ErrAuthChallengeCanceled
 	}
 	if a.initializationErr != nil {
 		initializationErr := a.initializationErr
@@ -310,7 +310,7 @@ func (a *gpAuthentication) Advance(
 	}
 }
 
-func (a *gpAuthentication) advancePrelogin(ctx context.Context) (obtainedSession, *authFormRequest, error) {
+func (a *gpAuthentication) advancePrelogin(ctx context.Context) (obtainedSession, *authenticationRequest, error) {
 	interfacePath := "global-protect"
 	if a.currentInterface == gpInterfaceGateway {
 		interfacePath = "ssl-vpn"
@@ -354,52 +354,27 @@ func (a *gpAuthentication) advancePrelogin(ctx context.Context) (obtainedSession
 	return nil, a.buildLoginRequest(), nil
 }
 
-func (a *gpAuthentication) processSAMLPrelogin(prelogin gpPreloginForm) (obtainedSession, *authFormRequest, error) {
+func (a *gpAuthentication) processSAMLPrelogin(prelogin gpPreloginForm) (obtainedSession, *authenticationRequest, error) {
 	a.currentForm.usedSAML = true
-	if a.frontend.client.options.Browser != nil {
-		browserURL, err := decodeGPSAMLURL(prelogin.samlMethod, prelogin.samlRequest)
-		if err != nil {
-			return nil, nil, err
-		}
-		a.stage = gpAuthenticationAwaitSAML
-		return nil, &authFormRequest{
-			FormID:  gpAuthenticationFormID,
-			Message: a.currentForm.message,
-			URL:     browserURL,
-			Browser: BrowserRequest{
-				URL:         browserURL,
-				HeaderNames: []string{"saml-username", "prelogin-cookie", "portal-userauthcookie"},
-			},
-		}, nil
+	browserURL, err := decodeGPSAMLURL(prelogin.samlMethod, prelogin.samlRequest)
+	if err != nil {
+		return nil, nil, err
 	}
-	secretName := a.alternateSecret
-	secretValue := ""
-	secretHidden := false
-	if secretName == "" && a.portalUserAuthCookie != "" {
-		secretName = "portal-userauthcookie"
-		secretValue = a.portalUserAuthCookie
-		secretHidden = true
-	}
-	if secretName == "" && a.portalPrelogonUserAuthCookie != "" {
-		secretName = "portal-prelogonuserauthcookie"
-		secretValue = a.portalPrelogonUserAuthCookie
-		secretHidden = true
-	}
-	if secretName == "" {
-		return nil, nil, ErrBrowserAuthenticationUnsupported
-	}
-	a.currentForm.secretName = secretName
-	a.currentForm.secretLabel = secretName
-	a.currentForm.secretValue = secretValue
-	a.currentForm.secretHidden = secretHidden
-	a.stage = gpAuthenticationAwaitLogin
-	return nil, a.buildLoginRequest(), nil
+	a.stage = gpAuthenticationAwaitSAML
+	return nil, &authenticationRequest{
+		FormID:  gpAuthenticationFormID,
+		Message: a.currentForm.message,
+		Browser: &BrowserRequest{
+			URL:         browserURL,
+			HeaderNames: []string{"saml-username", "prelogin-cookie", "portal-userauthcookie"},
+		},
+	}, nil
 }
 
 func (a *gpAuthentication) advanceSAML(
 	ctx context.Context,
-	response *authFormResponse,
-) (obtainedSession, *authFormRequest, error) {
+	response *authenticationResponse,
+) (obtainedSession, *authenticationRequest, error) {
 	if response.BrowserResult == nil {
 		return nil, nil, ErrInvalidBrowserAuthentication
 	}
@@ -422,8 +397,8 @@ func (a *gpAuthentication) advanceSAML(
 
 func (a *gpAuthentication) advanceLogin(
 	ctx context.Context,
-	response *authFormResponse,
-) (obtainedSession, *authFormRequest, error) {
+	response *authenticationResponse,
+) (obtainedSession, *authenticationRequest, error) {
 	username, usernameLoaded := response.Values[gpUsernameSubmissionKey]
 	if !usernameLoaded {
 		return nil, nil, E.Extend(ErrProtocolNotSupported, "GlobalProtect login response omitted username")
@@ -437,7 +412,7 @@ func (a *gpAuthentication) advanceLogin(
 	return a.submitLogin(ctx)
 }
 
-func (a *gpAuthentication) submitLogin(ctx context.Context) (obtainedSession, *authFormRequest, error) {
+func (a *gpAuthentication) submitLogin(ctx context.Context) (obtainedSession, *authenticationRequest, error) {
 	form := a.buildLoginValues()
 	loginURL := cloneGPURL(a.currentURL)
 	if a.currentInterface == gpInterfacePortal {
@@ -466,7 +441,7 @@ func (a *gpAuthentication) submitLogin(ctx context.Context) (obtainedSession, *a
 func (a *gpAuthentication) processPortalLogin(
 	ctx context.Context,
 	responseBody []byte,
-) (obtainedSession, *authFormRequest, error) {
+) (obtainedSession, *authenticationRequest, error) {
 	configuration, challenge, err := parseGPPortalConfiguration(responseBody, a.region)
 	if err != nil {
 		return nil, nil, err
@@ -487,7 +462,7 @@ func (a *gpAuthentication) processPortalLogin(
 	return a.selectConfiguredGateway(ctx)
 }
 
-func (a *gpAuthentication) processGatewayLogin(responseBody []byte) (obtainedSession, *authFormRequest, error) {
+func (a *gpAuthentication) processGatewayLogin(responseBody []byte) (obtainedSession, *authenticationRequest, error) {
 	opaqueQuery, challenge, err := parseGPLoginResponse(responseBody, a.frontend.localHostname)
 	if err != nil {
 		return nil, nil, err
@@ -522,7 +497,7 @@ func (a *gpAuthentication) processGatewayLogin(responseBody []byte) (obtainedSes
 func (a *gpAuthentication) handleRejectedLogin(
 	ctx context.Context,
 	message string,
-) (obtainedSession, *authFormRequest, error) {
+) (obtainedSession, *authenticationRequest, error) {
 	if message == "" {
 		message = "Invalid username or password"
 	}
@@ -539,7 +514,7 @@ func (a *gpAuthentication) handleRejectedLogin(
 	return nil, a.buildLoginRequest(), nil
 }
 
-func (a *gpAuthentication) selectConfiguredGateway(ctx context.Context) (obtainedSession, *authFormRequest, error) {
+func (a *gpAuthentication) selectConfiguredGateway(ctx context.Context) (obtainedSession, *authenticationRequest, error) {
 	if len(a.gatewayChoices) == 1 {
 		return a.selectGateway(ctx, a.gatewayChoices[0])
 	}
@@ -558,10 +533,10 @@ func (a *gpAuthentication) selectConfiguredGateway(ctx context.Context) (obtaine
 	for _, gateway := range a.gatewayChoices {
 		options = append(options, AuthFormChoice{Value: gateway.formValue, Label: gateway.label})
 	}
-	return nil, &authFormRequest{
+	return nil, &authenticationRequest{
 		FormID:  gpPortalFormID,
 		Message: "Please select GlobalProtect gateway.",
-		Fields: []authFormRequestField{{
+		Fields: []authenticationRequestField{{
 			SubmissionKey: gpGatewaySubmissionKey,
 			Name:          "gateway",
 			Label:         "GATEWAY:",
@@ -575,8 +550,8 @@ func (a *gpAuthentication) selectConfiguredGateway(ctx context.Context) (obtaine
 
 func (a *gpAuthentication) advanceGatewaySelection(
 	ctx context.Context,
-	response *authFormResponse,
-) (obtainedSession, *authFormRequest, error) {
+	response *authenticationResponse,
+) (obtainedSession, *authenticationRequest, error) {
 	selection, loaded := response.Values[gpGatewaySubmissionKey]
 	if !loaded {
 		return nil, nil, E.Extend(ErrProtocolNotSupported, "GlobalProtect gateway selection response omitted gateway")
@@ -592,7 +567,7 @@ func (a *gpAuthentication) advanceGatewaySelection(
 func (a *gpAuthentication) selectGateway(
 	ctx context.Context,
 	gateway gpPortalGateway,
-) (obtainedSession, *authFormRequest, error) {
+) (obtainedSession, *authenticationRequest, error) {
 	gatewayURL, err := url.Parse("https://" + gateway.name)
 	if err != nil {
 		return nil, nil, E.Cause(err, "parse GlobalProtect gateway endpoint")
@@ -654,7 +629,7 @@ func (a *gpAuthentication) buildLoginForm(prelogin gpPreloginForm) gpLoginForm {
 	}
 }
 
-func (a *gpAuthentication) buildLoginRequest() *authFormRequest {
+func (a *gpAuthentication) buildLoginRequest() *authenticationRequest {
 	usernameKind := AuthFormFieldText
 	usernameCacheKey := authCacheUsername
 	if a.currentForm.usernameHidden {
@@ -668,11 +643,11 @@ func (a *gpAuthentication) buildLoginRequest() *authFormRequest {
 	} else if secretKind == AuthFormFieldPassword && !a.currentForm.challenge {
 		secretCacheKey = authCachePassword
 	}
-	request := &authFormRequest{
+	request := &authenticationRequest{
 		FormID:  a.currentForm.formID,
 		Message: a.currentForm.message,
 		Error:   a.currentForm.errorMessage,
-		Fields: []authFormRequestField{
+		Fields: []authenticationRequestField{
 			{
 				SubmissionKey: gpUsernameSubmissionKey,
 				Name:          "user",
@@ -875,9 +850,9 @@ func (a *gpAuthentication) recordHTTPResponse(response gpHTTPResponse) {
 }
 
 func (a *gpAuthentication) stableCredential(key string) string {
-	a.frontend.client.authFormAccess.Lock()
+	a.frontend.client.authChallengeAccess.Lock()
 	value := a.frontend.client.stableCredentials[key]
-	a.frontend.client.authFormAccess.Unlock()
+	a.frontend.client.authChallengeAccess.Unlock()
 	return value
 }
 

@@ -226,7 +226,7 @@ func parseFortinetHTMLChallenge(content []byte) (*fortinetAuthenticationForm, er
 
 func encodeFortinetAuthenticationResponse(
 	form *fortinetAuthenticationForm,
-	response *authFormResponse,
+	response *authenticationResponse,
 	realm string,
 	initial bool,
 ) (string, string, error) {

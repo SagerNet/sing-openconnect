@@ -144,7 +144,7 @@ func TestM1AnyConnectDynamicDNSReconnectInterop(t *testing.T) {
 	}
 	waitForM1DynamicDNSTunnel(t, ctx, peer.replacementTunnelReady, peer.failures, "replacement dynamic-DNS tunnel")
 	readM1DynamicDNSPayload(t, ctx, client, "data from replacement backend")
-	if form := client.PendingAuthForm(); form != nil {
+	if form := client.PendingAuthChallenge(); form != nil {
 		t.Fatalf("dynamic-DNS resolver switch unexpectedly required reauthentication: %#v", form)
 	}
 
@@ -156,7 +156,7 @@ func TestM1AnyConnectDynamicDNSReconnectInterop(t *testing.T) {
 	}
 	waitForM1DynamicDNSTunnel(t, ctx, peer.fallbackTunnelReady, peer.failures, "cached-address fallback tunnel")
 	readM1DynamicDNSPayload(t, ctx, client, "data from cached-address fallback")
-	if form := client.PendingAuthForm(); form != nil {
+	if form := client.PendingAuthChallenge(); form != nil {
 		t.Fatalf("dynamic-DNS cached fallback unexpectedly required reauthentication: %#v", form)
 	}
 

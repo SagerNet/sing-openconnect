@@ -145,12 +145,12 @@ func (a *fortinetAuthentication) Close() error {
 
 func (a *fortinetAuthentication) Advance(
 	ctx context.Context,
-	response *authFormResponse,
-) (obtainedSession, *authFormRequest, error) {
+	response *authenticationResponse,
+) (obtainedSession, *authenticationRequest, error) {
 	a.access.Lock()
 	if a.closed {
 		a.access.Unlock()
-		return nil, nil, ErrAuthFormCanceled
+		return nil, nil, ErrAuthChallengeCanceled
 	}
 	if a.initializationErr != nil {
 		initializationErr := a.initializationErr
@@ -219,7 +219,7 @@ func (a *fortinetAuthentication) Advance(
 
 func (a *fortinetAuthentication) beginAuthentication(
 	ctx context.Context,
-) (obtainedSession, *authFormRequest, error) {
+) (obtainedSession, *authenticationRequest, error) {
 	currentURL := cloneFortinetURL(a.currentURL)
 	for redirectNumber := 0; ; redirectNumber++ {
 		if redirectNumber > fortinetMaximumAuthenticationRedirects {
@@ -278,7 +278,7 @@ func (a *fortinetAuthentication) processAuthenticationResponse(
 	httpResponse fortinetHTTPResponse,
 	previousForm *fortinetAuthenticationForm,
 	previousInitial bool,
-) (obtainedSession, *authFormRequest, error) {
+) (obtainedSession, *authenticationRequest, error) {
 	a.rememberHTTPResponse(httpResponse)
 	state, cookieErr := a.sessionFromCookies(httpResponse.requestURL)
 	if cookieErr != nil {
@@ -342,8 +342,8 @@ func (a *fortinetAuthentication) buildAuthenticationRequest(
 	form *fortinetAuthenticationForm,
 	initial bool,
 	errorMessage string,
-) *authFormRequest {
-	request := &authFormRequest{
+) *authenticationRequest {
+	request := &authenticationRequest{
 		FormID:  form.id,
 		Message: form.message,
 		Error:   errorMessage,
@@ -352,7 +352,7 @@ func (a *fortinetAuthentication) buildAuthenticationRequest(
 		request.ClearCacheKeys = []string{authCachePassword}
 	}
 	for _, field := range form.fields {
-		requestField := authFormRequestField{
+		requestField := authenticationRequestField{
 			SubmissionKey: field.submissionKey,
 			Name:          field.name,
 			Label:         field.label,

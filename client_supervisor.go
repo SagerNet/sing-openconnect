@@ -48,9 +48,8 @@ func classifyClientSessionError(err error) clientSessionErrorClass {
 		err,
 		ErrMissingServer,
 		ErrUnsupportedFlavor,
-		ErrAuthFormCanceled,
+		ErrAuthChallengeCanceled,
 		ErrAuthenticationFailed,
-		ErrBrowserAuthenticationUnsupported,
 		ErrInvalidBrowserAuthentication,
 		ErrMaterialSourceConflict,
 		ErrInvalidTLSMaterial,
@@ -276,7 +275,7 @@ func (c *Client) obtainSession(ctx context.Context) (obtainedSession, error) {
 	if continuation == nil {
 		return nil, E.Extend(ErrProtocolNotSupported, "flavor returned an empty authentication continuation")
 	}
-	var response *authFormResponse
+	var response *authenticationResponse
 	for {
 		session, request, err := continuation.Advance(ctx, response)
 		if err != nil {
@@ -288,7 +287,7 @@ func (c *Client) obtainSession(ctx context.Context) (obtainedSession, error) {
 		if session != nil {
 			if request != nil {
 				closeErr := continuation.Close()
-				contractErr := E.Extend(ErrProtocolNotSupported, "authentication continuation returned a session and a pending form together")
+				contractErr := E.Extend(ErrProtocolNotSupported, "authentication continuation returned a session and a pending challenge together")
 				return nil, E.Append(contractErr, closeErr, func(cause error) error {
 					return E.Cause(cause, "close invalid openconnect authentication continuation")
 				})
@@ -297,19 +296,19 @@ func (c *Client) obtainSession(ctx context.Context) (obtainedSession, error) {
 		}
 		if request == nil {
 			closeErr := continuation.Close()
-			contractErr := E.Extend(ErrProtocolNotSupported, "authentication continuation returned neither a session nor a pending form")
+			contractErr := E.Extend(ErrProtocolNotSupported, "authentication continuation returned neither a session nor a pending challenge")
 			return nil, E.Append(contractErr, closeErr, func(cause error) error {
 				return E.Cause(cause, "close invalid openconnect authentication continuation")
 			})
 		}
-		formResponse, formErr := c.awaitAuthForm(ctx, *request, continuation)
-		if formErr != nil {
+		challengeResponse, challengeErr := c.awaitAuthChallenge(ctx, *request, continuation)
+		if challengeErr != nil {
 			closeErr := continuation.Close()
-			return nil, E.Append(formErr, closeErr, func(cause error) error {
+			return nil, E.Append(challengeErr, closeErr, func(cause error) error {
 				return E.Cause(cause, "close openconnect authentication continuation")
 			})
 		}
-		response = &formResponse
+		response = &challengeResponse
 	}
 }
 

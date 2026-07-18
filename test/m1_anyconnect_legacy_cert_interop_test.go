@@ -110,12 +110,12 @@ func TestM1AnyConnectLegacyFallbackInterop(t *testing.T) {
 			client := newM1AnyConnectClient(t, ctx, server.URL+"/vpn/start", openconnect.ClientOptions{NoUDP: true})
 			startM1Client(t, client)
 			form := waitForM1AuthForm(t, ctx, client)
-			if form.URL != "" || len(form.Fields) != 3 {
+			if form.Browser != nil || form.Form == nil || len(form.Form.Fields) != 3 {
 				t.Fatalf("legacy authentication-complete form was not exposed with all visible instances: %#v", form)
 			}
-			values := make(map[string]string, len(form.Fields))
-			seenSubmissionKeys := make(map[string]struct{}, len(form.Fields))
-			for _, field := range form.Fields {
+			values := make(map[string]string, len(form.Form.Fields))
+			seenSubmissionKeys := make(map[string]struct{}, len(form.Form.Fields))
+			for _, field := range form.Form.Fields {
 				if _, exists := seenSubmissionKeys[field.SubmissionKey]; exists {
 					t.Fatalf("legacy duplicate field instance reused submission key %q", field.SubmissionKey)
 				}
@@ -131,7 +131,7 @@ func TestM1AnyConnectLegacyFallbackInterop(t *testing.T) {
 					t.Fatalf("unexpected legacy visible field: %#v", field)
 				}
 			}
-			err := client.CompleteAuthForm(form.ID, values)
+			err := client.CompleteAuthChallenge(form.ID, openconnect.AuthResponse{Form: &openconnect.AuthFormResponse{Values: values}})
 			if err != nil {
 				t.Fatal(E.Cause(err, "complete legacy authentication-complete form"))
 			}
@@ -201,11 +201,11 @@ func TestM1AnyConnectCrossHostRedirectCredentialInterop(t *testing.T) {
 	client := newM1AnyConnectClient(t, ctx, origin.URL+"/vpn/start", openconnect.ClientOptions{NoUDP: true})
 	startM1Client(t, client)
 	firstForm := waitForM1CrossHostAuthForm(t, ctx, client, peer.errors)
-	if firstForm.URL != "" || len(firstForm.Fields) != 3 {
+	if firstForm.Browser != nil || firstForm.Form == nil || len(firstForm.Form.Fields) != 3 {
 		t.Fatalf("cross-host first authentication form was incomplete: %#v", firstForm)
 	}
-	firstValues := make(map[string]string, len(firstForm.Fields))
-	for _, field := range firstForm.Fields {
+	firstValues := make(map[string]string, len(firstForm.Form.Fields))
+	for _, field := range firstForm.Form.Fields {
 		switch field.Name {
 		case "username":
 			firstValues[field.SubmissionKey] = "redirect-user"
@@ -217,16 +217,16 @@ func TestM1AnyConnectCrossHostRedirectCredentialInterop(t *testing.T) {
 			t.Fatalf("cross-host first form exposed an unexpected field: %#v", field)
 		}
 	}
-	err := client.CompleteAuthForm(firstForm.ID, firstValues)
+	err := client.CompleteAuthChallenge(firstForm.ID, openconnect.AuthResponse{Form: &openconnect.AuthFormResponse{Values: firstValues}})
 	if err != nil {
 		t.Fatal(E.Cause(err, "complete cross-host first authentication form"))
 	}
 	secondForm := waitForM1CrossHostAuthForm(t, ctx, client, peer.errors)
-	if secondForm.ID == firstForm.ID || secondForm.URL != "" || len(secondForm.Fields) != 3 {
+	if secondForm.ID == firstForm.ID || secondForm.Browser != nil || secondForm.Form == nil || len(secondForm.Form.Fields) != 3 {
 		t.Fatalf("stable credentials were not reused independently of the one-shot answer: first=%#v second=%#v", firstForm, secondForm)
 	}
-	secondValues := make(map[string]string, len(secondForm.Fields))
-	for _, field := range secondForm.Fields {
+	secondValues := make(map[string]string, len(secondForm.Form.Fields))
+	for _, field := range secondForm.Form.Fields {
 		switch field.Name {
 		case "username":
 			if field.Value != "redirect-user" {
@@ -247,7 +247,7 @@ func TestM1AnyConnectCrossHostRedirectCredentialInterop(t *testing.T) {
 			t.Fatalf("cross-host second form exposed an unexpected field: %#v", field)
 		}
 	}
-	err = client.CompleteAuthForm(secondForm.ID, secondValues)
+	err = client.CompleteAuthChallenge(secondForm.ID, openconnect.AuthResponse{Form: &openconnect.AuthFormResponse{Values: secondValues}})
 	if err != nil {
 		t.Fatal(E.Cause(err, "complete cross-host second authentication form"))
 	}
@@ -901,14 +901,14 @@ func waitForM1CrossHostAuthForm(
 	ctx context.Context,
 	client *openconnect.Client,
 	errors <-chan error,
-) *openconnect.AuthForm {
+) *openconnect.AuthChallenge {
 	t.Helper()
 	for {
-		form := client.PendingAuthForm()
+		form := client.PendingAuthChallenge()
 		if form != nil {
 			return form
 		}
-		updated := client.AuthFormUpdated()
+		updated := client.AuthChallengeUpdated()
 		select {
 		case <-ctx.Done():
 			t.Fatal(E.Cause(ctx.Err(), "wait for cross-host authentication form"))

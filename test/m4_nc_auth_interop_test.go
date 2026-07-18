@@ -130,13 +130,13 @@ func TestM4NetworkConnectAuthenticationPeerInterop(t *testing.T) {
 		terminalErrors <- readErr
 	}()
 	for {
-		form := client.PendingAuthForm()
+		form := client.PendingAuthChallenge()
 		if form != nil {
-			if form.Banner != "frmSelectRoles" || len(form.Fields) != 1 {
+			if form.Browser != nil || form.Form == nil || form.Banner != "frmSelectRoles" || len(form.Form.Fields) != 1 {
 				t.Fatalf("unexpected Network Connect authentication form: %#v", form)
 			}
 			selected := ""
-			for _, choice := range form.Fields[0].Options {
+			for _, choice := range form.Form.Fields[0].Options {
 				if choice.Label == "Role B" {
 					selected = choice.Value
 				}
@@ -144,7 +144,7 @@ func TestM4NetworkConnectAuthenticationPeerInterop(t *testing.T) {
 			if selected == "" {
 				t.Fatal("Network Connect role form omitted Role B")
 			}
-			err = client.CompleteAuthForm(form.ID, map[string]string{form.Fields[0].SubmissionKey: selected})
+			err = client.CompleteAuthChallenge(form.ID, openconnect.AuthResponse{Form: &openconnect.AuthFormResponse{Values: map[string]string{form.Form.Fields[0].SubmissionKey: selected}}})
 			if err != nil {
 				t.Fatal(E.Cause(err, "complete Network Connect role selection"))
 			}

@@ -144,12 +144,12 @@ func (a *f5Authentication) Close() error {
 
 func (a *f5Authentication) Advance(
 	ctx context.Context,
-	response *authFormResponse,
-) (obtainedSession, *authFormRequest, error) {
+	response *authenticationResponse,
+) (obtainedSession, *authenticationRequest, error) {
 	a.access.Lock()
 	if a.closed {
 		a.access.Unlock()
-		return nil, nil, ErrAuthFormCanceled
+		return nil, nil, ErrAuthChallengeCanceled
 	}
 	if a.initializationErr != nil {
 		initializationErr := a.initializationErr
@@ -230,7 +230,7 @@ func (a *f5Authentication) doAuthenticationExchange(
 	method string,
 	requestURL *url.URL,
 	encodedForm string,
-) (obtainedSession, *authFormRequest, error) {
+) (obtainedSession, *authenticationRequest, error) {
 	currentMethod := method
 	currentURL := cloneF5URL(requestURL)
 	currentBody := encodedForm
@@ -367,7 +367,7 @@ func (a *f5Authentication) doAuthenticationRequest(
 
 func (a *f5Authentication) authenticationRequestFromDocument(
 	content []byte,
-) (obtainedSession, *authFormRequest, error) {
+) (obtainedSession, *authenticationRequest, error) {
 	form, warnings, parseErr := parseF5AuthenticationDocument(content)
 	if parseErr != nil {
 		return nil, nil, markTerminal(parseErr)
@@ -412,8 +412,8 @@ func (a *f5Authentication) buildAuthenticationRequestLocked(
 	stableUsername bool,
 	stablePrimaryPassword bool,
 	repeatedPrimary bool,
-) *authFormRequest {
-	request := &authFormRequest{
+) *authenticationRequest {
+	request := &authenticationRequest{
 		FormID:  form.id,
 		Banner:  form.banner,
 		Message: form.message,
@@ -425,7 +425,7 @@ func (a *f5Authentication) buildAuthenticationRequestLocked(
 	primaryPasswordAssigned := false
 	for fieldIndex := range form.fields {
 		field := &form.fields[fieldIndex]
-		requestField := authFormRequestField{
+		requestField := authenticationRequestField{
 			SubmissionKey: field.submissionKey,
 			Name:          field.name,
 			Label:         field.label,
@@ -455,10 +455,10 @@ func (a *f5Authentication) buildAuthenticationRequestLocked(
 	return request
 }
 
-func (a *f5Authentication) normalizeConfiguredDomainLocked(field *authFormRequestField) {
-	a.frontend.client.authFormAccess.Lock()
+func (a *f5Authentication) normalizeConfiguredDomainLocked(field *authenticationRequestField) {
+	a.frontend.client.authChallengeAccess.Lock()
 	configuredDomain := a.frontend.client.stableCredentials[authCacheAuthGroup]
-	a.frontend.client.authFormAccess.Unlock()
+	a.frontend.client.authChallengeAccess.Unlock()
 	if configuredDomain == "" {
 		return
 	}
@@ -518,7 +518,7 @@ func (a *f5Authentication) resetAuthenticationJar() error {
 	return nil
 }
 
-func encodeF5AuthenticationResponse(form *f5AuthenticationForm, response *authFormResponse) (string, error) {
+func encodeF5AuthenticationResponse(form *f5AuthenticationForm, response *authenticationResponse) (string, error) {
 	var encoded strings.Builder
 	for fieldIndex, field := range form.fields {
 		value, loaded := response.Values[field.submissionKey]

@@ -656,14 +656,14 @@ func answerM3Fortinet405(t *testing.T, ctx context.Context, client *openconnect.
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		form := client.PendingAuthForm()
+		form := client.PendingAuthChallenge()
 		if form != nil {
-			if !strings.Contains(form.Error, "Invalid credentials") {
+			if form.Browser != nil || form.Form == nil || !strings.Contains(form.Error, "Invalid credentials") {
 				t.Fatalf("Fortinet 405 did not publish the invalid-credentials error: %#v", form)
 			}
-			values := make(map[string]string, len(form.Fields))
+			values := make(map[string]string, len(form.Form.Fields))
 			credentialFound := false
-			for _, field := range form.Fields {
+			for _, field := range form.Form.Fields {
 				value := field.Value
 				if field.Name == "credential" {
 					if field.Value != "" {
@@ -677,7 +677,7 @@ func answerM3Fortinet405(t *testing.T, ctx context.Context, client *openconnect.
 			if !credentialFound {
 				t.Fatal("Fortinet 405 retry form omitted credential")
 			}
-			completeErr := client.CompleteAuthForm(form.ID, values)
+			completeErr := client.CompleteAuthChallenge(form.ID, openconnect.AuthResponse{Form: &openconnect.AuthFormResponse{Values: values}})
 			if completeErr != nil {
 				t.Fatal(E.Cause(completeErr, "complete Fortinet 405 retry form"))
 			}
@@ -704,7 +704,7 @@ func waitM3FortinetConfigurationEvent(
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if form := client.PendingAuthForm(); form != nil {
+		if form := client.PendingAuthChallenge(); form != nil {
 			t.Fatalf("independent Fortinet peer unexpectedly required interactive authentication: %#v", form)
 		}
 		select {

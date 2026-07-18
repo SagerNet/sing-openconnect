@@ -148,8 +148,11 @@ func TestM1AnyConnectClientAuthenticationInterop(t *testing.T) {
 				t.Fatalf("authentication form ID was reused: %s", form.ID)
 			}
 			seenForms[form.ID] = struct{}{}
-			values := make(map[string]string, len(form.Fields))
-			for _, field := range form.Fields {
+			if form.Form == nil || form.Browser != nil {
+				t.Fatalf("unexpected ocserv authentication challenge: %#v", form)
+			}
+			values := make(map[string]string, len(form.Form.Fields))
+			for _, field := range form.Form.Fields {
 				switch field.Name {
 				case "group_list":
 					selectedGroup = true
@@ -164,7 +167,7 @@ func TestM1AnyConnectClientAuthenticationInterop(t *testing.T) {
 					t.Fatalf("unexpected ocserv authentication field: %#v", field)
 				}
 			}
-			err := client.CompleteAuthForm(form.ID, values)
+			err := client.CompleteAuthChallenge(form.ID, openconnect.AuthResponse{Form: &openconnect.AuthFormResponse{Values: values}})
 			if err != nil {
 				t.Fatal(E.Cause(err, "complete ocserv authentication form"))
 			}
@@ -191,7 +194,7 @@ func TestM1AnyConnectClientAuthenticationInterop(t *testing.T) {
 		})
 		startM1Client(t, client)
 		waitForM1Ready(t, ctx, client)
-		if form := client.PendingAuthForm(); form != nil {
+		if form := client.PendingAuthChallenge(); form != nil {
 			t.Fatalf("prefilled authentication unexpectedly prompted: %#v", form)
 		}
 		assertM1OcservUserGroup(t, ctx, container, prefilledUsername, "group1")
@@ -228,7 +231,7 @@ func TestM1AnyConnectClientCertificateInterop(t *testing.T) {
 	})
 	startM1Client(t, client)
 	waitForM1Ready(t, ctx, client)
-	if form := client.PendingAuthForm(); form != nil {
+	if form := client.PendingAuthChallenge(); form != nil {
 		t.Fatalf("certificate-only authentication unexpectedly prompted: %#v", form)
 	}
 	assertM1OcservUsername(t, ctx, container, "certificate-user")
@@ -265,7 +268,7 @@ func TestM1AnyConnectOATHInterop(t *testing.T) {
 		})
 		startM1Client(t, client)
 		waitForM1Ready(t, ctx, client)
-		if form := client.PendingAuthForm(); form != nil {
+		if form := client.PendingAuthChallenge(); form != nil {
 			t.Fatalf("automatic TOTP unexpectedly prompted: %#v", form)
 		}
 		assertM1OATHConsumerUpdated(t, container, "HOTP/T30")
@@ -402,7 +405,7 @@ func TestM1AnyConnectRekeyAndReconnectInterop(t *testing.T) {
 			if rekey.Reason != openconnect.TunnelConfigurationEventRekey {
 				t.Fatalf("negotiated %s rekey reported %s", method, rekey.Reason)
 			}
-			if form := client.PendingAuthForm(); form != nil {
+			if form := client.PendingAuthChallenge(); form != nil {
 				t.Fatalf("rekey did not reuse the ocserv session cookie: %#v", form)
 			}
 			exchangeM1TunnelEcho(t, ctx, client, 0x4d33, 1, "sing-openconnect-m1-rekey-"+method)
@@ -447,7 +450,7 @@ func TestM1AnyConnectRekeyAndReconnectInterop(t *testing.T) {
 		if reestablishment.Reason != openconnect.TunnelConfigurationEventReestablishment {
 			t.Fatalf("ordinary disconnect reported %s", reestablishment.Reason)
 		}
-		if form := client.PendingAuthForm(); form != nil {
+		if form := client.PendingAuthChallenge(); form != nil {
 			t.Fatalf("ordinary reconnect did not reuse the ocserv session cookie: %#v", form)
 		}
 		exchangeM1TunnelEcho(t, ctx, client, 0x4d33, 2, "sing-openconnect-m1-reconnect")
@@ -460,7 +463,10 @@ func TestM1AnyConnectRekeyAndReconnectInterop(t *testing.T) {
 			t.Fatal("invalidated cookie reauthentication completed without prompting")
 		}
 		passwordField := false
-		for _, field := range form.Fields {
+		if form.Form == nil || form.Browser != nil {
+			t.Fatalf("invalidated cookie returned a non-form challenge: %#v", form)
+		}
+		for _, field := range form.Form.Fields {
 			if field.Name == "password" {
 				passwordField = true
 				if field.Value != "" {
@@ -687,7 +693,7 @@ func waitForM1Ready(t *testing.T, ctx context.Context, client *openconnect.Clien
 
 func waitForM1ClientStateChange(t *testing.T, ctx context.Context, client *openconnect.Client) {
 	t.Helper()
-	updated := client.AuthFormUpdated()
+	updated := client.AuthChallengeUpdated()
 	select {
 	case <-ctx.Done():
 		t.Fatal(E.Cause(ctx.Err(), "wait for M1 AnyConnect client state"))
@@ -696,12 +702,12 @@ func waitForM1ClientStateChange(t *testing.T, ctx context.Context, client *openc
 	}
 }
 
-func waitForM1AuthForm(t *testing.T, ctx context.Context, client *openconnect.Client) *openconnect.AuthForm {
+func waitForM1AuthForm(t *testing.T, ctx context.Context, client *openconnect.Client) *openconnect.AuthChallenge {
 	t.Helper()
 	return waitForM1AuthFormState(t, ctx, client, false)
 }
 
-func waitForM1AuthFormOrReady(t *testing.T, ctx context.Context, client *openconnect.Client) *openconnect.AuthForm {
+func waitForM1AuthFormOrReady(t *testing.T, ctx context.Context, client *openconnect.Client) *openconnect.AuthChallenge {
 	t.Helper()
 	return waitForM1AuthFormState(t, ctx, client, true)
 }
@@ -711,17 +717,17 @@ func waitForM1AuthFormState(
 	ctx context.Context,
 	client *openconnect.Client,
 	allowReady bool,
-) *openconnect.AuthForm {
+) *openconnect.AuthChallenge {
 	t.Helper()
 	for {
-		form := client.PendingAuthForm()
+		form := client.PendingAuthChallenge()
 		if form != nil {
 			return form
 		}
 		if allowReady && client.Ready() {
 			return nil
 		}
-		updated := client.AuthFormUpdated()
+		updated := client.AuthChallengeUpdated()
 		select {
 		case <-ctx.Done():
 			t.Fatal(E.Cause(ctx.Err(), "wait for M1 AnyConnect authentication form"))

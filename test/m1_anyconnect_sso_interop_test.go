@@ -17,11 +17,6 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
-type m1SSOBrowser struct {
-	requests chan openconnect.BrowserRequest
-	release  chan struct{}
-}
-
 type m1SSOSubmission struct {
 	XMLName xml.Name `xml:"config-auth"`
 	Type    string   `xml:"type,attr"`
@@ -142,16 +137,11 @@ func TestM1AnyConnectSSOCompanionInterop(t *testing.T) {
 	consumerURL = consumer.URL
 	t.Cleanup(consumer.Close)
 
-	browser := &m1SSOBrowser{
-		requests: make(chan openconnect.BrowserRequest, 1),
-		release:  make(chan struct{}),
-	}
 	client, err := openconnect.NewClient(openconnect.ClientOptions{
 		Context: ctx,
 		Server:  strings.TrimPrefix(consumer.URL, "https://"),
 		Flavor:  openconnect.FlavorAnyConnect,
 		NoUDP:   true,
-		Browser: browser,
 		Token: &openconnect.TokenOptions{
 			Mode:    openconnect.TokenModeHOTP,
 			Secret:  base32.StdEncoding.EncodeToString([]byte("12345678901234567890")),
@@ -179,24 +169,21 @@ func TestM1AnyConnectSSOCompanionInterop(t *testing.T) {
 		t.Fatal(E.Cause(err, "start AnyConnect SSO client"))
 	}
 	companionForm := waitForM1AuthForm(t, ctx, client)
-	if companionForm.URL != "" || len(companionForm.Fields) != 1 || companionForm.Fields[0].Name != "username" {
+	if companionForm.Browser != nil || companionForm.Form == nil || len(companionForm.Form.Fields) != 1 || companionForm.Form.Fields[0].Name != "username" {
 		t.Fatalf("SSO companion stage was not a standalone visible form: %#v", companionForm)
 	}
-	err = client.CompleteAuthForm(companionForm.ID, map[string]string{
-		companionForm.Fields[0].SubmissionKey: "companion-user",
-	})
+	err = client.CompleteAuthChallenge(companionForm.ID, openconnect.AuthResponse{Form: &openconnect.AuthFormResponse{Values: map[string]string{
+		companionForm.Form.Fields[0].SubmissionKey: "companion-user",
+	}}})
 	if err != nil {
 		t.Fatal(E.Cause(err, "complete AnyConnect SSO companion form"))
 	}
 
-	var browserRequest openconnect.BrowserRequest
-	select {
-	case <-ctx.Done():
-		t.Fatal(E.Cause(ctx.Err(), "wait for AnyConnect BrowserRequest"))
-	case consumerErr := <-consumerErrors:
-		t.Fatal(consumerErr)
-	case browserRequest = <-browser.requests:
+	browserChallenge := waitForM1AuthForm(t, ctx, client)
+	if browserChallenge.Form != nil || browserChallenge.Browser == nil {
+		t.Fatalf("SSO browser stage was not published as a browser challenge: %#v", browserChallenge)
 	}
+	browserRequest := browserChallenge.Browser
 	expectedLoginURL := consumer.URL + "/browser/login"
 	expectedFinalURL := consumer.URL + "/browser/final"
 	if browserRequest.URL != expectedLoginURL || browserRequest.FinalURL != expectedFinalURL {
@@ -208,14 +195,17 @@ func TestM1AnyConnectSSOCompanionInterop(t *testing.T) {
 	if len(browserRequest.HeaderNames) != 0 {
 		t.Fatalf("unexpected AnyConnect BrowserRequest headers: %#v", browserRequest.HeaderNames)
 	}
-	browserForm := client.PendingAuthForm()
-	if browserForm == nil || browserForm.URL != expectedLoginURL || len(browserForm.Fields) != 0 {
-		t.Fatalf("SSO browser stage was not published through PendingAuthForm: %#v", browserForm)
-	}
 	if persistedCounter.Load() != 0 {
 		t.Fatalf("HOTP counter advanced before browser completion: %d", persistedCounter.Load())
 	}
-	close(browser.release)
+	err = client.CompleteAuthChallenge(browserChallenge.ID, openconnect.AuthResponse{Browser: &openconnect.BrowserResult{
+		FinalURL: browserRequest.FinalURL,
+		Cookies:  []openconnect.BrowserCookie{{Name: "sso-token", Value: "browser-token"}},
+		Header:   http.Header{"X-Sso-Consumer-Proof": []string{"browser-proof"}},
+	}})
+	if err != nil {
+		t.Fatal(E.Cause(err, "complete AnyConnect SSO browser challenge"))
+	}
 
 	select {
 	case <-ctx.Done():
@@ -284,24 +274,6 @@ func TestM1AnyConnectSSOCompanionInterop(t *testing.T) {
 	if client.Ready() {
 		t.Fatal("AnyConnect SSO client republished Ready after its CSTP tunnel closed")
 	}
-}
-
-func (b *m1SSOBrowser) Authenticate(ctx context.Context, request openconnect.BrowserRequest) (openconnect.BrowserResult, error) {
-	select {
-	case <-ctx.Done():
-		return openconnect.BrowserResult{}, ctx.Err()
-	case b.requests <- request:
-	}
-	select {
-	case <-ctx.Done():
-		return openconnect.BrowserResult{}, ctx.Err()
-	case <-b.release:
-	}
-	return openconnect.BrowserResult{
-		FinalURL: request.FinalURL,
-		Cookies:  []openconnect.BrowserCookie{{Name: "sso-token", Value: "browser-token"}},
-		Header:   http.Header{"X-Sso-Consumer-Proof": []string{"browser-proof"}},
-	}, nil
 }
 
 func reportM1SSOConsumerError(errors chan<- error, err error) {

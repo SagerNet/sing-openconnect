@@ -195,7 +195,7 @@ func runM1STokenConsumer(t *testing.T, parentContext context.Context, fixture m1
 	if err != nil {
 		t.Fatal(E.Cause(err, "create AnyConnect stoken client"))
 	}
-	authFormUpdated := client.AuthFormUpdated()
+	authFormUpdated := client.AuthChallengeUpdated()
 	t.Cleanup(func() {
 		closeErr := client.Close()
 		if closeErr != nil && !E.IsClosed(closeErr) {
@@ -212,10 +212,10 @@ func runM1STokenConsumer(t *testing.T, parentContext context.Context, fixture m1
 	case consumerErr := <-consumerErrors:
 		t.Fatal(consumerErr)
 	case <-authFormUpdated:
-		t.Fatalf("automatic stoken next-tokencode flow published a user form: %#v", client.PendingAuthForm())
+		t.Fatalf("automatic stoken next-tokencode flow published a user form: %#v", client.PendingAuthChallenge())
 	case <-accepted:
 	}
-	if form := client.PendingAuthForm(); form != nil {
+	if form := client.PendingAuthChallenge(); form != nil {
 		t.Fatalf("automatic stoken unexpectedly prompted: %#v", form)
 	}
 }

@@ -70,13 +70,13 @@ type pulseAuthenticationChallenge struct {
 	errorMessage        string
 }
 
-func (c pulseAuthenticationChallenge) formRequest(generator *softwareTokenGenerator) (*authFormRequest, error) {
+func (c pulseAuthenticationChallenge) formRequest(generator *softwareTokenGenerator) (*authenticationRequest, error) {
 	switch c.kind {
 	case pulseChallengeRealmEntry:
-		return &authFormRequest{
+		return &authenticationRequest{
 			FormID:  "pulse_realm_entry",
 			Message: "Enter Pulse user realm:",
-			Fields: []authFormRequestField{{
+			Fields: []authenticationRequestField{{
 				SubmissionKey: pulseRealmSubmissionKey,
 				Name:          "realm",
 				Label:         "Realm:",
@@ -95,10 +95,10 @@ func (c pulseAuthenticationChallenge) formRequest(generator *softwareTokenGenera
 			label := session.identifier + " from " + session.source + " at " + session.createdAt.Format(time.RFC1123)
 			choices = append(choices, AuthFormChoice{Value: session.identifier, Label: label})
 		}
-		return &authFormRequest{
+		return &authenticationRequest{
 			FormID:  "pulse_session_kill",
 			Message: message.String(),
-			Fields: []authFormRequestField{{
+			Fields: []authenticationRequestField{{
 				SubmissionKey: pulseSessionSubmissionKey,
 				Name:          "session_choice",
 				Label:         "Session:",
@@ -125,7 +125,7 @@ func pulseChoiceForm(
 	submissionKey string,
 	values []string,
 	cacheKey string,
-) *authFormRequest {
+) *authenticationRequest {
 	choices := make([]AuthFormChoice, 0, len(values))
 	for _, value := range values {
 		choices = append(choices, AuthFormChoice{Value: value, Label: value})
@@ -134,10 +134,10 @@ func pulseChoiceForm(
 	if len(values) > 0 {
 		defaultValue = values[0]
 	}
-	return &authFormRequest{
+	return &authenticationRequest{
 		FormID:  formID,
 		Message: message,
-		Fields: []authFormRequestField{{
+		Fields: []authenticationRequestField{{
 			SubmissionKey: submissionKey,
 			Name:          name,
 			Label:         label,
@@ -149,7 +149,7 @@ func pulseChoiceForm(
 	}
 }
 
-func (c pulseAuthenticationChallenge) passwordForm() *authFormRequest {
+func (c pulseAuthenticationChallenge) passwordForm() *authenticationRequest {
 	primary := c.promptFlags&pulsePromptPrimary != 0
 	formID := "pulse_secondary"
 	message := "Enter secondary credentials:"
@@ -157,7 +157,7 @@ func (c pulseAuthenticationChallenge) passwordForm() *authFormRequest {
 		formID = "pulse_user"
 		message = "Enter user credentials:"
 	}
-	request := &authFormRequest{FormID: formID, Message: message, Error: c.errorMessage}
+	request := &authenticationRequest{FormID: formID, Message: message, Error: c.errorMessage}
 	if primary && c.passwordRequestCode == pulseJuniperPasswordRetry {
 		request.ClearCacheKeys = []string{authCacheUsername, authCachePassword}
 	}
@@ -174,7 +174,7 @@ func (c pulseAuthenticationChallenge) passwordForm() *authFormRequest {
 		if primary {
 			cacheKey = authCacheUsername
 		}
-		request.Fields = append(request.Fields, authFormRequestField{
+		request.Fields = append(request.Fields, authenticationRequestField{
 			SubmissionKey: pulseUsernameSubmissionKey,
 			Name:          "username",
 			Label:         label,
@@ -195,7 +195,7 @@ func (c pulseAuthenticationChallenge) passwordForm() *authFormRequest {
 		if primary {
 			cacheKey = authCachePassword
 		}
-		request.Fields = append(request.Fields, authFormRequestField{
+		request.Fields = append(request.Fields, authenticationRequestField{
 			SubmissionKey: pulsePasswordSubmissionKey,
 			Name:          "password",
 			Label:         label,
@@ -206,16 +206,16 @@ func (c pulseAuthenticationChallenge) passwordForm() *authFormRequest {
 	return request
 }
 
-func (c pulseAuthenticationChallenge) passwordChangeForm() *authFormRequest {
+func (c pulseAuthenticationChallenge) passwordChangeForm() *authenticationRequest {
 	formID := "pulse_secondary_change"
 	if c.promptFlags&pulsePromptPrimary != 0 {
 		formID = "pulse_user_change"
 	}
-	return &authFormRequest{
+	return &authenticationRequest{
 		FormID:  formID,
 		Message: "Password expired. Please change password:",
 		Error:   c.errorMessage,
-		Fields: []authFormRequestField{
+		Fields: []authenticationRequestField{
 			{
 				SubmissionKey: pulseOldPasswordSubmissionKey,
 				Name:          "oldpass",
@@ -238,13 +238,13 @@ func (c pulseAuthenticationChallenge) passwordChangeForm() *authFormRequest {
 	}
 }
 
-func (c pulseAuthenticationChallenge) gtcForm(generator *softwareTokenGenerator) *authFormRequest {
+func (c pulseAuthenticationChallenge) gtcForm(generator *softwareTokenGenerator) *authenticationRequest {
 	primary := c.promptFlags&pulsePromptPrimary != 0
 	message := "Token code request:"
 	if c.gtcNext && c.gtcPrompt != "" {
 		message = c.gtcPrompt
 	}
-	request := &authFormRequest{FormID: "pulse_gtc", Message: message}
+	request := &authenticationRequest{FormID: "pulse_gtc", Message: message}
 	if c.promptFlags&pulsePromptUsername != 0 {
 		label := c.userPrompt
 		if label == "" {
@@ -258,7 +258,7 @@ func (c pulseAuthenticationChallenge) gtcForm(generator *softwareTokenGenerator)
 		if primary {
 			cacheKey = authCacheUsername
 		}
-		request.Fields = append(request.Fields, authFormRequestField{
+		request.Fields = append(request.Fields, authenticationRequestField{
 			SubmissionKey: pulseUsernameSubmissionKey,
 			Name:          "username",
 			Label:         label,
@@ -274,7 +274,7 @@ func (c pulseAuthenticationChallenge) gtcForm(generator *softwareTokenGenerator)
 	} else if label == "" {
 		label = "Please enter your secondary token information:"
 	}
-	tokenField := authFormRequestField{
+	tokenField := authenticationRequestField{
 		SubmissionKey: pulseTokenSubmissionKey,
 		Name:          "tokencode",
 		Label:         label,
@@ -295,7 +295,7 @@ func (c pulseAuthenticationChallenge) gtcForm(generator *softwareTokenGenerator)
 	return request
 }
 
-func (c pulseAuthenticationChallenge) buildResponse(response authFormResponse) ([]byte, string, error) {
+func (c pulseAuthenticationChallenge) buildResponse(response authenticationResponse) ([]byte, string, error) {
 	switch c.kind {
 	case pulseChallengeRealmEntry:
 		return pulseStringResponse(response, pulseRealmSubmissionKey, 0xd50)
@@ -316,7 +316,7 @@ func (c pulseAuthenticationChallenge) buildResponse(response authFormResponse) (
 	}
 }
 
-func pulseStringResponse(response authFormResponse, submissionKey string, code uint32) ([]byte, string, error) {
+func pulseStringResponse(response authenticationResponse, submissionKey string, code uint32) ([]byte, string, error) {
 	value, loaded := response.Values[submissionKey]
 	if !loaded || value == "" {
 		return nil, "", E.New("Pulse authentication response omitted ", submissionKey)
@@ -325,7 +325,7 @@ func pulseStringResponse(response authFormResponse, submissionKey string, code u
 	return content, "", err
 }
 
-func (c pulseAuthenticationChallenge) buildPasswordResponse(response authFormResponse) ([]byte, string, error) {
+func (c pulseAuthenticationChallenge) buildPasswordResponse(response authenticationResponse) ([]byte, string, error) {
 	var content []byte
 	if c.promptFlags&pulsePromptUsername != 0 {
 		username, loaded := response.Values[pulseUsernameSubmissionKey]
@@ -384,7 +384,7 @@ func (c pulseAuthenticationChallenge) buildPasswordResponse(response authFormRes
 	return content, "", nil
 }
 
-func (c pulseAuthenticationChallenge) buildPasswordChangeResponse(response authFormResponse) ([]byte, string, error) {
+func (c pulseAuthenticationChallenge) buildPasswordChangeResponse(response authenticationResponse) ([]byte, string, error) {
 	oldPassword, oldLoaded := response.Values[pulseOldPasswordSubmissionKey]
 	newPassword, newLoaded := response.Values[pulseNewPasswordSubmissionKey]
 	verifyPassword, verifyLoaded := response.Values[pulseVerifyPasswordSubmissionKey]
@@ -419,7 +419,7 @@ func (c pulseAuthenticationChallenge) buildPasswordChangeResponse(response authF
 	return content, "", err
 }
 
-func (c pulseAuthenticationChallenge) buildGTCResponse(response authFormResponse) ([]byte, string, error) {
+func (c pulseAuthenticationChallenge) buildGTCResponse(response authenticationResponse) ([]byte, string, error) {
 	var content []byte
 	if c.promptFlags&pulsePromptUsername != 0 {
 		username, loaded := response.Values[pulseUsernameSubmissionKey]

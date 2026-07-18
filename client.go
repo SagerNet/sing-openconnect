@@ -24,9 +24,9 @@ type Client struct {
 	httpClient                *http.Client
 	httpTransport             *http.Transport
 	frontend                  flavorFrontend
-	authFormAccess            sync.Mutex
-	authFormUpdated           chan struct{}
-	pendingAuthForm           *pendingAuthFormState
+	authChallengeAccess       sync.Mutex
+	authChallengeUpdated      chan struct{}
+	pendingAuthChallenge      *pendingAuthChallengeState
 	stableCredentials         map[string]string
 	configurationAccess       sync.RWMutex
 	tunnelConfiguration       TunnelConfiguration
@@ -85,7 +85,7 @@ func NewClient(options ClientOptions) (*Client, error) {
 		tlsConfig:              tlsConfig,
 		mcaIdentity:            mcaIdentity,
 		clientCertificateSet:   len(tlsConfig.Certificates) > 0 || tlsConfig.GetClientCertificate != nil,
-		authFormUpdated:        make(chan struct{}),
+		authChallengeUpdated:   make(chan struct{}),
 		stableCredentials:      make(map[string]string),
 		configurationEventWake: make(chan struct{}, 1),
 		activeTransportUpdated: make(chan struct{}),
@@ -410,11 +410,11 @@ func (c *Client) Close() error {
 		default:
 		}
 
-		c.authFormAccess.Lock()
-		pending := c.pendingAuthForm
-		c.pendingAuthForm = nil
-		c.signalAuthFormUpdatedLocked()
-		c.authFormAccess.Unlock()
+		c.authChallengeAccess.Lock()
+		pending := c.pendingAuthChallenge
+		c.pendingAuthChallenge = nil
+		c.signalAuthChallengeUpdatedLocked()
+		c.authChallengeAccess.Unlock()
 		if pending != nil && pending.cancel != nil {
 			cancelErr := pending.cancel()
 			if cancelErr != nil {

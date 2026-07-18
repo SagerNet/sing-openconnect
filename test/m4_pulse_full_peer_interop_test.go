@@ -113,8 +113,8 @@ func TestM4PulseIndependentTLSFullPeer(t *testing.T) {
 			t.Fatal(E.Cause(ctx.Err(), "wait for independent Pulse TLS tunnel"))
 		case peerErr := <-peer.failures:
 			t.Fatal(peerErr)
-		case <-client.AuthFormUpdated():
-			if client.PendingAuthForm() != nil {
+		case <-client.AuthChallengeUpdated():
+			if client.PendingAuthChallenge() != nil {
 				t.Fatal("Pulse stable credentials unexpectedly published a form")
 			}
 		case <-time.After(10 * time.Millisecond):
@@ -278,8 +278,8 @@ func TestM4PulseIndependentEAPTTLSFullPeer(t *testing.T) {
 		select {
 		case <-ctx.Done():
 			t.Fatalf("wait for Pulse EAP-TTLS tunnel: %v: %s", ctx.Err(), standardError.String())
-		case <-client.AuthFormUpdated():
-			if client.PendingAuthForm() != nil {
+		case <-client.AuthChallengeUpdated():
+			if client.PendingAuthChallenge() != nil {
 				t.Fatal("Pulse EAP-TTLS stable credentials unexpectedly published a form")
 			}
 		case <-time.After(10 * time.Millisecond):

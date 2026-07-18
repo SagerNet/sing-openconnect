@@ -22,11 +22,7 @@ import (
 	"golang.org/x/net/publicsuffix"
 )
 
-const (
-	anyConnectMaximumAuthenticationBody   = 16 * 1024 * 1024
-	anyConnectMaximumAuthenticationRounds = 64
-	anyConnectMaximumRedirects            = 10
-)
+const anyConnectMaximumRedirects = 10
 
 var errAnyConnectXMLPostFallback = E.New("AnyConnect XMLPOST probe requires legacy authentication fallback")
 
@@ -67,7 +63,6 @@ type anyConnectAuthentication struct {
 	clientCertificateFailureReason string
 	primaryPasswordSubmitted       bool
 	tokenGenerator                 *softwareTokenGenerator
-	rounds                         int
 	closed                         bool
 	advancing                      bool
 }
@@ -165,12 +160,12 @@ func (a *anyConnectAuthentication) Close() error {
 
 func (a *anyConnectAuthentication) Advance(
 	ctx context.Context,
-	response *authFormResponse,
-) (obtainedSession, *authFormRequest, error) {
+	response *authenticationResponse,
+) (obtainedSession, *authenticationRequest, error) {
 	a.access.Lock()
 	if a.closed {
 		a.access.Unlock()
-		return nil, nil, ErrAuthFormCanceled
+		return nil, nil, ErrAuthChallengeCanceled
 	}
 	if a.initializationErr != nil {
 		initializationErr := a.initializationErr
@@ -227,7 +222,7 @@ func (a *anyConnectAuthentication) Advance(
 	}
 }
 
-func (a *anyConnectAuthentication) advanceInitialXML(ctx context.Context) (obtainedSession, *authFormRequest, error) {
+func (a *anyConnectAuthentication) advanceInitialXML(ctx context.Context) (obtainedSession, *authenticationRequest, error) {
 	a.clearWebVPNCookie()
 	a.selectedGroup = a.stableCredential(authCacheAuthGroup)
 	body, err := buildAnyConnectInitialXML(a.frontend.client, a.currentURL, a.selectedGroup, false)
@@ -258,7 +253,7 @@ func (a *anyConnectAuthentication) advanceInitialXML(ctx context.Context) (obtai
 	return a.processAuthenticationForm(ctx, form)
 }
 
-func (a *anyConnectAuthentication) advanceInitialLegacy(ctx context.Context) (obtainedSession, *authFormRequest, error) {
+func (a *anyConnectAuthentication) advanceInitialLegacy(ctx context.Context) (obtainedSession, *authenticationRequest, error) {
 	httpResponse, err := a.doAuthenticationRequest(ctx, http.MethodGet, a.currentURL, "", nil, false)
 	if err != nil {
 		return nil, nil, err
@@ -279,8 +274,8 @@ func (a *anyConnectAuthentication) advanceInitialLegacy(ctx context.Context) (ob
 
 func (a *anyConnectAuthentication) advanceAuthGroup(
 	ctx context.Context,
-	response *authFormResponse,
-) (obtainedSession, *authFormRequest, error) {
+	response *authenticationResponse,
+) (obtainedSession, *authenticationRequest, error) {
 	groupField := findAnyConnectAuthGroup(&a.currentForm)
 	if groupField == nil {
 		return nil, nil, E.Extend(ErrProtocolNotSupported, "AnyConnect authgroup response has no matching group_list field")
@@ -305,8 +300,8 @@ func (a *anyConnectAuthentication) advanceAuthGroup(
 
 func (a *anyConnectAuthentication) advanceForm(
 	ctx context.Context,
-	response *authFormResponse,
-) (obtainedSession, *authFormRequest, error) {
+	response *authenticationResponse,
+) (obtainedSession, *authenticationRequest, error) {
 	err := a.applyAuthenticationFieldValues(response, false)
 	if err != nil {
 		return nil, nil, err
@@ -314,7 +309,7 @@ func (a *anyConnectAuthentication) advanceForm(
 	return a.submitAuthenticationForm(ctx)
 }
 
-func (a *anyConnectAuthentication) advanceSSOCompanion(response *authFormResponse) (obtainedSession, *authFormRequest, error) {
+func (a *anyConnectAuthentication) advanceSSOCompanion(response *authenticationResponse) (obtainedSession, *authenticationRequest, error) {
 	err := a.applyAuthenticationFieldValues(response, true)
 	if err != nil {
 		return nil, nil, err
@@ -329,8 +324,8 @@ func (a *anyConnectAuthentication) advanceSSOCompanion(response *authFormRespons
 
 func (a *anyConnectAuthentication) advanceSSOBrowser(
 	ctx context.Context,
-	response *authFormResponse,
-) (obtainedSession, *authFormRequest, error) {
+	response *authenticationResponse,
+) (obtainedSession, *authenticationRequest, error) {
 	err := a.applySSOResponse(response.BrowserResult)
 	if err != nil {
 		return nil, nil, err
@@ -349,7 +344,7 @@ func (a *anyConnectAuthentication) advanceSSOBrowser(
 	return a.submitAuthenticationForm(ctx)
 }
 
-func (a *anyConnectAuthentication) submitAuthenticationForm(ctx context.Context) (obtainedSession, *authFormRequest, error) {
+func (a *anyConnectAuthentication) submitAuthenticationForm(ctx context.Context) (obtainedSession, *authenticationRequest, error) {
 	for i := range a.currentForm.Fields {
 		field := &a.currentForm.Fields[i]
 		if field.Kind == anyConnectFormFieldPassword && field.StableCredential {
@@ -394,7 +389,7 @@ func (a *anyConnectAuthentication) submitAuthenticationForm(ctx context.Context)
 func (a *anyConnectAuthentication) processAuthenticationForm(
 	ctx context.Context,
 	form anyConnectForm,
-) (obtainedSession, *authFormRequest, error) {
+) (obtainedSession, *authenticationRequest, error) {
 	reorderAnyConnectAuthGroup(&form)
 	if form.Opaque != nil {
 		a.opaque = form.Opaque
@@ -451,7 +446,7 @@ func (a *anyConnectAuthentication) processAuthenticationForm(
 	// Upstream handle_auth_form treats authentication-complete as an empty automatic POST only when the form has no options.
 	if form.PostAuthenticationComplete && len(form.Fields) == 0 {
 		a.stage = anyConnectAuthenticationAwaitForm
-		return a.advanceForm(ctx, &authFormResponse{Values: map[string]string{}})
+		return a.advanceForm(ctx, &authenticationResponse{Values: map[string]string{}})
 	}
 	if len(form.Fields) == 0 {
 		reason := form.Error
@@ -512,7 +507,7 @@ func (a *anyConnectAuthentication) processAuthenticationForm(
 	return a.yieldAuthenticationRequest()
 }
 
-func (a *anyConnectAuthentication) advanceClientCertificateFailure(ctx context.Context) (obtainedSession, *authFormRequest, error) {
+func (a *anyConnectAuthentication) advanceClientCertificateFailure(ctx context.Context) (obtainedSession, *authenticationRequest, error) {
 	body, err := buildAnyConnectInitialXML(a.frontend.client, a.currentURL, a.selectedGroup, true)
 	if err != nil {
 		return nil, nil, err
@@ -542,7 +537,7 @@ func (a *anyConnectAuthentication) advanceClientCertificateFailure(ctx context.C
 	return a.processAuthenticationForm(ctx, form)
 }
 
-func (a *anyConnectAuthentication) yieldAuthenticationRequest() (obtainedSession, *authFormRequest, error) {
+func (a *anyConnectAuthentication) yieldAuthenticationRequest() (obtainedSession, *authenticationRequest, error) {
 	request, err := a.buildAuthenticationRequest()
 	if err != nil {
 		return nil, nil, err
@@ -563,8 +558,8 @@ func (a *anyConnectAuthentication) yieldAuthenticationRequest() (obtainedSession
 	return nil, request, nil
 }
 
-func (a *anyConnectAuthentication) buildAuthenticationRequest() (*authFormRequest, error) {
-	request := &authFormRequest{
+func (a *anyConnectAuthentication) buildAuthenticationRequest() (*authenticationRequest, error) {
+	request := &authenticationRequest{
 		FormID:  a.currentForm.AuthenticationID,
 		Banner:  a.currentForm.Banner,
 		Message: a.currentForm.Message,
@@ -581,7 +576,7 @@ func (a *anyConnectAuthentication) buildAuthenticationRequest() (*authFormReques
 		if a.currentForm.SSO.Requested && field.Kind == anyConnectFormFieldToken {
 			continue
 		}
-		requestField := authFormRequestField{
+		requestField := authenticationRequestField{
 			SubmissionKey: field.SubmissionKey,
 			Name:          field.Name,
 			Label:         field.Label,
@@ -636,7 +631,7 @@ func (a *anyConnectAuthentication) generateSoftwareToken(ctx context.Context, me
 	return token, nil
 }
 
-func (a *anyConnectAuthentication) buildSSOBrowserRequest() (*authFormRequest, error) {
+func (a *anyConnectAuthentication) buildSSOBrowserRequest() (*authenticationRequest, error) {
 	if a.currentForm.SSO.LoginURL == "" {
 		return nil, markTerminal(E.New("AnyConnect SSO form omitted sso-v2-login URL"))
 	}
@@ -646,25 +641,26 @@ func (a *anyConnectAuthentication) buildSSOBrowserRequest() (*authFormRequest, e
 	if a.currentForm.SSO.TokenCookie == "" {
 		return nil, markTerminal(E.New("AnyConnect SSO form omitted sso-v2-token-cookie-name"))
 	}
-	loginURL, err := a.resolveAuthenticationURL(a.currentForm.SSO.LoginURL)
+	loginURL, err := url.Parse(a.currentForm.SSO.LoginURL)
 	if err != nil {
-		return nil, err
+		return nil, markTerminal(E.Cause(err, "parse AnyConnect SSO login URL"))
 	}
-	finalURL, err := a.resolveAuthenticationURL(a.currentForm.SSO.FinalURL)
+	finalURL, err := url.Parse(a.currentForm.SSO.FinalURL)
 	if err != nil {
-		return nil, err
+		return nil, markTerminal(E.Cause(err, "parse AnyConnect SSO final URL"))
 	}
+	loginURL = a.currentURL.ResolveReference(loginURL)
+	finalURL = a.currentURL.ResolveReference(finalURL)
 	a.currentForm.SSO.LoginURL = loginURL.String()
 	a.currentForm.SSO.FinalURL = finalURL.String()
-	request := &authFormRequest{
+	request := &authenticationRequest{
 		FormID:  a.currentForm.AuthenticationID,
 		Banner:  a.currentForm.Banner,
 		Message: a.currentForm.Message,
 		Error:   a.currentForm.Error,
-		URL:     loginURL.String(),
-		Browser: BrowserRequest{
-			URL:         loginURL.String(),
-			FinalURL:    finalURL.String(),
+		Browser: &BrowserRequest{
+			URL:         a.currentForm.SSO.LoginURL,
+			FinalURL:    a.currentForm.SSO.FinalURL,
 			CookieNames: []string{a.currentForm.SSO.TokenCookie},
 		},
 	}
@@ -680,7 +676,7 @@ func (a *anyConnectAuthentication) buildSSOBrowserRequest() (*authFormRequest, e
 			return nil, markTerminal(E.New("AnyConnect SSO companion token requires TokenOptions"))
 		}
 		tokenMessage := a.currentForm.Message
-		request.Fields = append(request.Fields, authFormRequestField{
+		request.Fields = append(request.Fields, authenticationRequestField{
 			SubmissionKey: field.SubmissionKey,
 			Name:          field.Name,
 			Label:         field.Label,
@@ -693,7 +689,7 @@ func (a *anyConnectAuthentication) buildSSOBrowserRequest() (*authFormRequest, e
 	return request, nil
 }
 
-func (a *anyConnectAuthentication) applyAuthenticationFieldValues(response *authFormResponse, skipToken bool) error {
+func (a *anyConnectAuthentication) applyAuthenticationFieldValues(response *authenticationResponse, skipToken bool) error {
 	for i := range a.currentForm.Fields {
 		field := &a.currentForm.Fields[i]
 		if field.Ignore || field.Kind == anyConnectFormFieldSSOToken {
@@ -718,7 +714,7 @@ func (a *anyConnectAuthentication) applyAuthenticationFieldValues(response *auth
 	return nil
 }
 
-// Upstream cstp_sso_detect_done accepts the named non-empty token cookie, reports the error cookie, and does not finish until the browser reaches sso-v2-login-final.
+// Upstream cstp_sso_detect_done captures the named non-empty token cookie when present, reports the error cookie, and does not finish until the browser reaches sso-v2-login-final.
 func (a *anyConnectAuthentication) applySSOResponse(result *BrowserResult) error {
 	if result == nil {
 		return ErrInvalidBrowserAuthentication
@@ -735,9 +731,6 @@ func (a *anyConnectAuthentication) applySSOResponse(result *BrowserResult) error
 		if cookie.Name == a.currentForm.SSO.ErrorCookie && cookie.Value != "" {
 			return newRetryableAuthenticationError(E.New("AnyConnect SSO failed: ", cookie.Value))
 		}
-	}
-	if tokenValue == "" {
-		return E.Errors(ErrInvalidBrowserAuthentication, E.New("AnyConnect SSO browser result omitted token cookie: ", a.currentForm.SSO.TokenCookie))
 	}
 	for i := range a.currentForm.Fields {
 		if a.currentForm.Fields[i].Kind == anyConnectFormFieldSSOToken {
@@ -764,10 +757,6 @@ func (a *anyConnectAuthentication) doAuthenticationRequest(
 		maximumRequests = 3
 	}
 	for requestCount := 0; requestCount < maximumRequests; requestCount++ {
-		a.rounds++
-		if a.rounds > anyConnectMaximumAuthenticationRounds {
-			return anyConnectHTTPResponse{}, markTerminal(E.New("AnyConnect authentication exceeded ", anyConnectMaximumAuthenticationRounds, " wire requests"))
-		}
 		request, err := http.NewRequestWithContext(ctx, currentMethod, currentURL.String(), bytes.NewReader(currentBody))
 		if err != nil {
 			return anyConnectHTTPResponse{}, markTerminal(E.Cause(err, "create AnyConnect authentication request"))
@@ -803,16 +792,13 @@ func (a *anyConnectAuthentication) doAuthenticationRequest(
 		if err != nil {
 			return anyConnectHTTPResponse{}, E.Cause(err, "send AnyConnect authentication request")
 		}
-		responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, anyConnectMaximumAuthenticationBody+1))
+		responseBody, readErr := io.ReadAll(response.Body)
 		closeErr := response.Body.Close()
 		if readErr != nil {
 			return anyConnectHTTPResponse{}, E.Errors(E.Cause(readErr, "read AnyConnect authentication response"), closeErr)
 		}
 		if closeErr != nil {
 			return anyConnectHTTPResponse{}, E.Cause(closeErr, "close AnyConnect authentication response")
-		}
-		if len(responseBody) > anyConnectMaximumAuthenticationBody {
-			return anyConnectHTTPResponse{}, markTerminal(E.New("AnyConnect authentication response exceeds ", anyConnectMaximumAuthenticationBody, " bytes"))
 		}
 		if !anyConnectRedirectStatus(response.StatusCode) || response.Header.Get("Location") == "" {
 			return anyConnectHTTPResponse{
@@ -829,9 +815,6 @@ func (a *anyConnectAuthentication) doAuthenticationRequest(
 		}
 		if location.Scheme != "https" || location.Hostname() == "" {
 			return anyConnectHTTPResponse{}, markTerminal(E.New("AnyConnect authentication redirected to a non-HTTPS URL: ", location.String()))
-		}
-		if location.User != nil {
-			return anyConnectHTTPResponse{}, markTerminal(E.New("AnyConnect authentication redirected to a URL containing user information"))
 		}
 		sameEndpoint := equalAnyConnectURLHost(currentURL, location)
 		if xmlPostProbe && sameEndpoint {
@@ -858,7 +841,7 @@ func (a *anyConnectAuthentication) processAutomaticAuthenticationReply(
 	ctx context.Context,
 	body []byte,
 	contentType string,
-) (obtainedSession, *authFormRequest, error) {
+) (obtainedSession, *authenticationRequest, error) {
 	targetURL := cloneAnyConnectURL(a.currentURL)
 	httpResponse, err := a.doAuthenticationRequest(ctx, http.MethodPost, targetURL, contentType, body, false)
 	if err != nil {
@@ -875,7 +858,7 @@ func (a *anyConnectAuthentication) processAutomaticAuthenticationReply(
 	return a.processAuthenticationForm(ctx, form)
 }
 
-func (a *anyConnectAuthentication) refreshAfterHostScan(ctx context.Context) (obtainedSession, *authFormRequest, error) {
+func (a *anyConnectAuthentication) refreshAfterHostScan(ctx context.Context) (obtainedSession, *authenticationRequest, error) {
 	body, err := buildAnyConnectInitialXML(a.frontend.client, a.currentURL, a.selectedGroup, false)
 	if err != nil {
 		return nil, nil, err
@@ -903,7 +886,7 @@ func (a *anyConnectAuthentication) refreshAfterHostScan(ctx context.Context) (ob
 	return a.processAuthenticationForm(ctx, form)
 }
 
-func (a *anyConnectAuthentication) completeAuthentication(sessionToken string) (obtainedSession, *authFormRequest, error) {
+func (a *anyConnectAuthentication) completeAuthentication(sessionToken string) (obtainedSession, *authenticationRequest, error) {
 	if sessionToken != "" {
 		a.setWebVPNCookie(sessionToken)
 	}
@@ -957,9 +940,6 @@ func (a *anyConnectAuthentication) resolveAuthenticationURL(reference string) (*
 	if resolved.Scheme != "https" || resolved.Hostname() == "" {
 		return nil, markTerminal(E.New("AnyConnect authentication form action is not HTTPS: ", resolved.String()))
 	}
-	if resolved.User != nil {
-		return nil, markTerminal(E.New("AnyConnect authentication URL contains user information"))
-	}
 	return resolved, nil
 }
 
@@ -974,9 +954,9 @@ func (a *anyConnectAuthentication) recordHTTPResponse(response anyConnectHTTPRes
 }
 
 func (a *anyConnectAuthentication) stableCredential(key string) string {
-	a.frontend.client.authFormAccess.Lock()
+	a.frontend.client.authChallengeAccess.Lock()
 	value := a.frontend.client.stableCredentials[key]
-	a.frontend.client.authFormAccess.Unlock()
+	a.frontend.client.authChallengeAccess.Unlock()
 	return value
 }
 
@@ -1045,7 +1025,7 @@ func (a *anyConnectAuthentication) stageUsesXMLPost() bool {
 func (a *anyConnectAuthentication) handleMultipleCertificateRequest(
 	ctx context.Context,
 	form anyConnectForm,
-) (obtainedSession, *authFormRequest, error) {
+) (obtainedSession, *authenticationRequest, error) {
 	if a.frontend.client.mcaIdentity == nil {
 		return nil, nil, E.Errors(ErrAuthenticationFailed, E.New("AnyConnect gateway requested multiple-certificate authentication, but no MCA identity was configured"))
 	}
@@ -1074,17 +1054,17 @@ func anyConnectRetryableHTTPStatus(statusCode int) bool {
 	}
 }
 
-func buildAnyConnectAuthGroupRequest(form anyConnectForm, field anyConnectFormField) authFormRequest {
+func buildAnyConnectAuthGroupRequest(form anyConnectForm, field anyConnectFormField) authenticationRequest {
 	options := make([]AuthFormChoice, 0, len(field.Choices))
 	for _, choice := range field.Choices {
 		options = append(options, AuthFormChoice{Value: choice.Name, Label: choice.Label})
 	}
-	return authFormRequest{
+	return authenticationRequest{
 		FormID:  form.AuthenticationID,
 		Banner:  form.Banner,
 		Message: form.Message,
 		Error:   form.Error,
-		Fields: []authFormRequestField{{
+		Fields: []authenticationRequestField{{
 			SubmissionKey: field.SubmissionKey,
 			Name:          field.Name,
 			Label:         field.Label,
@@ -1385,11 +1365,9 @@ func encodeAnyConnectCapabilities(encoder *xml.Encoder, client *Client) error {
 	if err != nil {
 		return E.Cause(err, "encode AnyConnect authentication capabilities")
 	}
-	if client.options.Browser != nil {
-		err = encodeAnyConnectTextElement(encoder, "auth-method", "single-sign-on-v2", nil)
-		if err != nil {
-			return err
-		}
+	err = encodeAnyConnectTextElement(encoder, "auth-method", "single-sign-on-v2", nil)
+	if err != nil {
+		return err
 	}
 	if client.mcaIdentity != nil {
 		err = encodeAnyConnectTextElement(encoder, "auth-method", "multiple-cert", nil)
