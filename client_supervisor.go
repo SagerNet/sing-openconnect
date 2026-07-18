@@ -92,13 +92,13 @@ func (c *Client) runSupervisor(ctx context.Context) {
 				if ctx.Err() != nil || c.isClosed() {
 					return
 				}
-				if c.options.Logger != nil {
-					c.options.Logger.DebugContext(ctx, "openconnect authentication failed; retrying: ", err)
-				}
 				c.handleRetryableAuthenticationError(err)
 				if classifyClientSessionError(err) == clientSessionErrorTerminal {
 					c.setTerminalError(err)
 					return
+				}
+				if c.options.Logger != nil {
+					c.options.Logger.DebugContext(ctx, "session setup failed; retrying in ", backoff, ": ", err)
 				}
 				if !waitClientReconnectBackoff(ctx, backoff) {
 					return
@@ -118,6 +118,9 @@ func (c *Client) runSupervisor(ctx context.Context) {
 				_ = closeObtainedSession(sessionState)
 				sessionState = nil
 				pendingRekeyEvent = false
+				if c.options.Logger != nil {
+					c.options.Logger.DebugContext(ctx, "tunnel session was rejected; retrying in ", backoff, ": ", err)
+				}
 				if !waitClientReconnectBackoff(ctx, backoff) {
 					return
 				}
@@ -139,12 +142,18 @@ func (c *Client) runSupervisor(ctx context.Context) {
 				sessionState = nil
 				pendingRekeyEvent = false
 				backoff = clientReconnectInitialBackoff
+				if c.options.Logger != nil {
+					c.options.Logger.DebugContext(ctx, "authentication was rejected; restarting authentication: ", err)
+				}
 				continue
 			}
 			if classifyClientSessionError(err) == clientSessionErrorTerminal {
 				_ = closeObtainedSession(sessionState)
 				c.setTerminalError(err)
 				return
+			}
+			if c.options.Logger != nil {
+				c.options.Logger.DebugContext(ctx, "tunnel connection failed; retrying in ", backoff, ": ", err)
 			}
 			if !waitClientReconnectBackoff(ctx, backoff) {
 				_ = closeObtainedSession(sessionState)
@@ -171,17 +180,28 @@ func (c *Client) runSupervisor(ctx context.Context) {
 				backoff = clientReconnectInitialBackoff
 				continue
 			}
-			if E.IsMulti(err, ErrSessionRejected) || c.handleRetryableAuthenticationError(err) {
+			sessionRejected := E.IsMulti(err, ErrSessionRejected)
+			retryableAuthentication := false
+			if !sessionRejected {
+				retryableAuthentication = c.handleRetryableAuthenticationError(err)
+			}
+			if sessionRejected || retryableAuthentication {
 				_ = closeObtainedSession(sessionState)
 				sessionState = nil
 				pendingRekeyEvent = false
-				if E.IsMulti(err, ErrSessionRejected) {
+				if sessionRejected {
+					if c.options.Logger != nil {
+						c.options.Logger.DebugContext(ctx, "tunnel session start was rejected; retrying in ", backoff, ": ", err)
+					}
 					if !waitClientReconnectBackoff(ctx, backoff) {
 						return
 					}
 					backoff = nextClientReconnectBackoff(backoff)
 				} else {
 					backoff = clientReconnectInitialBackoff
+					if c.options.Logger != nil {
+						c.options.Logger.DebugContext(ctx, "authentication was rejected while starting the tunnel; restarting authentication: ", err)
+					}
 				}
 				continue
 			}
@@ -189,6 +209,9 @@ func (c *Client) runSupervisor(ctx context.Context) {
 				_ = closeObtainedSession(sessionState)
 				c.setTerminalError(err)
 				return
+			}
+			if c.options.Logger != nil {
+				c.options.Logger.DebugContext(ctx, "tunnel start failed; retrying in ", backoff, ": ", err)
 			}
 			if !waitClientReconnectBackoff(ctx, backoff) {
 				_ = closeObtainedSession(sessionState)
@@ -214,6 +237,13 @@ func (c *Client) runSupervisor(ctx context.Context) {
 			return
 		}
 		c.publishTunnelConfigurationEvent(reason, configuration)
+		if c.options.Logger != nil {
+			if reason == TunnelConfigurationEventInitial {
+				c.options.Logger.InfoContext(ctx, c.options.Flavor, " tunnel established using ", c.ActiveTransport())
+			} else {
+				c.options.Logger.InfoContext(ctx, c.options.Flavor, " tunnel re-established using ", c.ActiveTransport())
+			}
+		}
 		var sessionErr error
 		select {
 		case <-ctx.Done():
@@ -237,6 +267,9 @@ func (c *Client) runSupervisor(ctx context.Context) {
 			_ = closeObtainedSession(sessionState)
 			sessionState = nil
 			pendingRekeyEvent = false
+			if c.options.Logger != nil {
+				c.options.Logger.DebugContext(ctx, "established tunnel session was rejected; retrying in ", backoff, ": ", sessionErr)
+			}
 			if !waitClientReconnectBackoff(ctx, backoff) {
 				return
 			}
@@ -254,12 +287,21 @@ func (c *Client) runSupervisor(ctx context.Context) {
 			sessionState = nil
 			pendingRekeyEvent = false
 			backoff = clientReconnectInitialBackoff
+			if c.options.Logger != nil {
+				c.options.Logger.DebugContext(ctx, "authentication expired; restarting authentication: ", sessionErr)
+			}
 			continue
 		}
 		if classifyClientSessionError(sessionErr) == clientSessionErrorTerminal {
 			_ = closeObtainedSession(sessionState)
 			c.setTerminalError(sessionErr)
 			return
+		}
+		if sessionErr == nil {
+			sessionErr = E.New("openconnect tunnel ended without an error")
+		}
+		if c.options.Logger != nil {
+			c.options.Logger.DebugContext(ctx, "tunnel ended; retrying in ", backoff, ": ", sessionErr)
 		}
 		if !waitClientReconnectBackoff(ctx, backoff) {
 			_ = closeObtainedSession(sessionState)

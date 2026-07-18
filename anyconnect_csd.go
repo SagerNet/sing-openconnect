@@ -252,15 +252,20 @@ func (a *anyConnectAuthentication) fetchAnyConnectHostScanData(ctx context.Conte
 		return nil, nil
 	}
 	fields := make([]anyConnectHostScanRequestedField, 0, len(dataDocument.Fields))
+	malformedFields := 0
 	for _, dataField := range dataDocument.Fields {
 		field, parseErr := parseAnyConnectHostScanRequestedField(dataField.Value)
 		if parseErr != nil {
+			malformedFields++
 			if a.frontend.client.options.Logger != nil {
-				a.frontend.client.options.Logger.WarnContext(ctx, "ignored malformed AnyConnect CSD data field: ", parseErr)
+				a.frontend.client.options.Logger.DebugContext(ctx, "ignored malformed AnyConnect CSD data field: ", parseErr)
 			}
 			continue
 		}
 		fields = append(fields, field)
+	}
+	if malformedFields > 0 && a.frontend.client.options.Logger != nil {
+		a.frontend.client.options.Logger.WarnContext(ctx, "ignored ", malformedFields, " malformed optional AnyConnect CSD data fields")
 	}
 	return fields, nil
 }
@@ -445,10 +450,7 @@ func (a *anyConnectAuthentication) probeAnyConnectHostScanCertificate(ctx contex
 	if authenticatedAddress.IsValid() {
 		a.authenticatedAddress = authenticatedAddress
 	}
-	closeErr := tlsConn.Close()
-	if closeErr != nil && a.frontend.client.options.Logger != nil {
-		a.frontend.client.options.Logger.DebugContext(ctx, "close AnyConnect CSD wrapper TLS probe: ", closeErr)
-	}
+	_ = tlsConn.Close()
 	return certificate, nil
 }
 
@@ -553,6 +555,7 @@ func buildAnyConnectHostScanReport(
 	ctx context.Context,
 	requestedFields []anyConnectHostScanRequestedField,
 	logger interface {
+		DebugContext(context.Context, ...any)
 		WarnContext(context.Context, ...any)
 	},
 	logContext context.Context,
@@ -608,6 +611,7 @@ func buildAnyConnectHostScanReport(
 			appendAnyConnectHostScanValue(&report, "endpoint.device.tcp6port["+strconv.Quote(portText)+"]", "true")
 		}
 	}
+	omittedFields := make([]string, 0)
 	for _, field := range requestedFields {
 		select {
 		case <-ctx.Done():
@@ -617,14 +621,18 @@ func buildAnyConnectHostScanReport(
 		switch field.Kind {
 		case "File":
 			err = appendAnyConnectHostScanFile(ctx, &report, field)
-			if err != nil && logger != nil {
-				logger.WarnContext(logContext, "could not inspect AnyConnect CSD file field ", field.Name, ": ", err)
+			if err != nil {
+				omittedFields = append(omittedFields, "File "+strconv.Quote(field.Name))
+				if logger != nil {
+					logger.DebugContext(logContext, "could not inspect AnyConnect CSD file field ", field.Name, ": ", err)
+				}
 			}
 		case "Process":
 			exists, known := localAnyConnectHostScanProcessExists(field.Value)
 			if !known {
+				omittedFields = append(omittedFields, "Process "+strconv.Quote(field.Name))
 				if logger != nil {
-					logger.WarnContext(logContext, "could not enumerate processes for AnyConnect CSD field ", field.Name)
+					logger.DebugContext(logContext, "could not enumerate processes for AnyConnect CSD field ", field.Name)
 				}
 				continue
 			}
@@ -634,11 +642,19 @@ func buildAnyConnectHostScanReport(
 			appendAnyConnectHostScanValue(&report, prefix+".name", field.Value)
 			appendAnyConnectHostScanValue(&report, prefix+".exists", strconv.FormatBool(exists))
 		case "Registry":
-		default:
+			omittedFields = append(omittedFields, "Registry "+strconv.Quote(field.Name))
 			if logger != nil {
-				logger.WarnContext(logContext, "ignored unsupported AnyConnect CSD field kind ", field.Kind, " for ", field.Name)
+				logger.DebugContext(logContext, "ignored unsupported AnyConnect CSD Registry field ", field.Name)
+			}
+		default:
+			omittedFields = append(omittedFields, field.Kind+" "+strconv.Quote(field.Name))
+			if logger != nil {
+				logger.DebugContext(logContext, "ignored unsupported AnyConnect CSD field kind ", field.Kind, " for ", field.Name)
 			}
 		}
+	}
+	if len(omittedFields) > 0 && logger != nil {
+		logger.WarnContext(logContext, "AnyConnect CSD report omitted or incompletely inspected ", len(omittedFields), " requested fields")
 	}
 	return []byte(report.String()), nil
 }

@@ -346,6 +346,7 @@ func (s *anyConnectCSTPSession) timerLoop() {
 func (s *anyConnectCSTPSession) dtlsLoop(initialResult chan<- error) {
 	defer s.waitGroup.Done()
 	initialResultPending := true
+	fallbackLogged := false
 	retryDelay := clientReconnectInitialBackoff
 	for s.ctx.Err() == nil && s.active.Load() {
 		negotiation := *s.dtlsNegotiation
@@ -365,6 +366,10 @@ func (s *anyConnectCSTPSession) dtlsLoop(initialResult chan<- error) {
 		if dtlsErr == nil {
 			s.applyDTLSMTU(channel.DetectedMTU())
 			s.client.setActiveTransport(s, TransportDTLS)
+			if fallbackLogged && s.client.options.Logger != nil {
+				s.client.options.Logger.InfoContext(s.ctx, "AnyConnect DTLS restored")
+			}
+			fallbackLogged = false
 		}
 		if initialResultPending {
 			initialResult <- dtlsErr
@@ -401,10 +406,15 @@ func (s *anyConnectCSTPSession) dtlsLoop(initialResult chan<- error) {
 			continue
 		}
 		if s.client.options.Logger != nil {
-			if dtlsErr == nil {
-				s.client.options.Logger.WarnContext(s.ctx, "AnyConnect DTLS stopped; retrying while CSTP remains active")
+			if fallbackLogged {
+				s.client.options.Logger.DebugContext(s.ctx, "AnyConnect DTLS retry failed; CSTP remains active: ", dtlsErr)
 			} else {
-				s.client.options.Logger.WarnContext(s.ctx, "AnyConnect DTLS unavailable; retrying while CSTP remains active: ", dtlsErr)
+				fallbackLogged = true
+				if dtlsErr == nil {
+					s.client.options.Logger.WarnContext(s.ctx, "AnyConnect DTLS stopped; retrying while CSTP remains active")
+				} else {
+					s.client.options.Logger.WarnContext(s.ctx, "AnyConnect DTLS unavailable; retrying while CSTP remains active: ", dtlsErr)
+				}
 			}
 		}
 		retryTimer := time.NewTimer(retryDelay)
