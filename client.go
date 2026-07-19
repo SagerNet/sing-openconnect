@@ -222,6 +222,16 @@ func (c *Client) Start() error {
 	return nil
 }
 
+func (c *Client) RestartSession() {
+	c.lifecycleAccess.Lock()
+	session := c.currentSession
+	c.lifecycleAccess.Unlock()
+	c.httpTransport.CloseIdleConnections()
+	if session != nil {
+		session.Fail(E.New("openconnect: session restart requested"))
+	}
+}
+
 // ReadDataPacket returns a caller-owned copy of the next packet.
 func (c *Client) ReadDataPacket(ctx context.Context) ([]byte, error) {
 	packetBuffer, err := c.ReadDataPacketBuffer(ctx)
