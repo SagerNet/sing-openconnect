@@ -356,6 +356,11 @@ func (a *gpAuthentication) advancePrelogin(ctx context.Context) (obtainedSession
 
 func (a *gpAuthentication) processSAMLPrelogin(prelogin gpPreloginForm) (obtainedSession, *authenticationRequest, error) {
 	a.currentForm.usedSAML = true
+	if a.alternateSecret != "" {
+		a.currentForm.secretLabel = a.alternateSecret
+		a.stage = gpAuthenticationAwaitLogin
+		return nil, a.buildLoginRequest(), nil
+	}
 	browserURL, err := decodeGPSAMLURL(prelogin.samlMethod, prelogin.samlRequest)
 	if err != nil {
 		return nil, nil, err

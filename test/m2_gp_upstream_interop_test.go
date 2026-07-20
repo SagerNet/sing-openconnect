@@ -131,10 +131,10 @@ func TestM2GlobalProtectUpstreamAuthenticationMatrix(t *testing.T) {
 		},
 		{
 			name:       "portal-alternate-secret-saml",
-			serverPath: "/portal:prelogin-cookie",
-			password:   "prelogin-cookie",
+			serverPath: "/portal:portal-userauthcookie",
+			password:   "portal-userauthcookie",
 			configuration: url.Values{
-				"portal_saml":   []string{"prelogin-cookie"},
+				"portal_saml":   []string{"portal-userauthcookie"},
 				"gateway_saml":  []string{"prelogin-cookie"},
 				"portal_cookie": []string{"portal-userauthcookie"},
 				"esp":           []string{"0"},
