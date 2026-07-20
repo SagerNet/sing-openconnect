@@ -5,10 +5,13 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"math/big"
 	"net"
+	"net/http"
+	"net/http/cookiejar"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -55,6 +58,7 @@ type m3FortinetFullPeerCase struct {
 	maximumPacket     bool
 	token             bool
 	answer405         bool
+	saml              bool
 	forbiddenMarkers  []string
 }
 
@@ -138,6 +142,14 @@ func TestM3FortinetIndependentFullPeerMatrix(t *testing.T) {
 			expectedTunnels:   []string{"FORTINET_PEER_LOGIN_405", "FORTINET_PEER_TLS_TUNNEL_1"},
 			expectedHostDials: 4,
 			answer405:         true,
+		},
+		{
+			name:              "saml-browser-cookie",
+			environment:       map[string]string{"SAML": "1"},
+			expectedCarrier:   "TLS",
+			expectedTunnels:   []string{"FORTINET_PEER_SAML_CHALLENGE", "FORTINET_PEER_SAML_BROWSER", "FORTINET_PEER_TLS_TUNNEL_1"},
+			expectedHostDials: 3,
+			saml:              true,
 		},
 		{
 			name:             "dtls12-lost-ok-ppp-first",
@@ -418,6 +430,9 @@ func runM3FortinetFullPeerCase(
 	if testCase.answer405 {
 		answerM3Fortinet405(t, ctx, client)
 	}
+	if testCase.saml {
+		answerM3FortinetSAML(t, ctx, client, peer.port, rootCertificate)
+	}
 	if testCase.configurationErr != "" {
 		readContext, cancelRead := context.WithTimeout(ctx, 20*time.Second)
 		_, readErr := client.ReadDataPacket(readContext)
@@ -619,6 +634,91 @@ func runM3FortinetFullPeerCase(
 			expectedLogouts,
 			closedLogs,
 		)
+	}
+}
+
+func answerM3FortinetSAML(
+	t *testing.T,
+	ctx context.Context,
+	client *openconnect.Client,
+	port uint16,
+	rootCertificate []byte,
+) {
+	t.Helper()
+	waitContext, cancelWait := context.WithTimeout(ctx, 15*time.Second)
+	defer cancelWait()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	var challenge *openconnect.AuthChallenge
+	for challenge == nil {
+		challenge = client.PendingAuthChallenge()
+		if challenge != nil {
+			break
+		}
+		select {
+		case <-waitContext.Done():
+			t.Fatal(E.Cause(waitContext.Err(), "wait for Fortinet SAML browser challenge"))
+		case <-ticker.C:
+		}
+	}
+	if challenge.Form != nil || challenge.Browser == nil {
+		t.Fatalf("Fortinet SAML did not publish a browser challenge: %#v", challenge)
+	}
+	expectedURL := "https://" + net.JoinHostPort(m3FortinetFullPeerHostname, strconv.Itoa(int(port))) + "/remote/saml/start?realm=fake%2BRealm"
+	if challenge.Browser.URL != expectedURL || challenge.Browser.FinalURL != "" || !slices.Equal(challenge.Browser.CookieNames, []string{"SVPNCOOKIE"}) {
+		t.Fatalf("Fortinet SAML published an unexpected browser request: %#v", challenge.Browser)
+	}
+	certificatePool := x509.NewCertPool()
+	if !certificatePool.AppendCertsFromPEM(rootCertificate) {
+		t.Fatal("append independent Fortinet browser root certificate")
+	}
+	jar, jarErr := cookiejar.New(nil)
+	if jarErr != nil {
+		t.Fatal(E.Cause(jarErr, "create independent Fortinet browser cookie jar"))
+	}
+	browserClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				RootCAs:    certificatePool,
+				ServerName: m3FortinetFullPeerHostname,
+			},
+			DialContext: func(ctx context.Context, network string, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))))
+			},
+		},
+		Jar: jar,
+	}
+	browserRequest, requestErr := http.NewRequestWithContext(waitContext, http.MethodGet, challenge.Browser.URL, nil)
+	if requestErr != nil {
+		t.Fatal(E.Cause(requestErr, "create independent Fortinet SAML browser request"))
+	}
+	browserRequest.Header.Set("User-Agent", "Mozilla/5.0 SV1")
+	browserResponse, responseErr := browserClient.Do(browserRequest)
+	if responseErr != nil {
+		t.Fatal(E.Cause(responseErr, "complete independent Fortinet SAML browser flow"))
+	}
+	closeErr := browserResponse.Body.Close()
+	if closeErr != nil {
+		t.Fatal(E.Cause(closeErr, "close independent Fortinet SAML browser response"))
+	}
+	if browserResponse.StatusCode != http.StatusOK {
+		t.Fatalf("independent Fortinet SAML browser returned HTTP %d", browserResponse.StatusCode)
+	}
+	var browserCookies []openconnect.BrowserCookie
+	for _, cookie := range jar.Cookies(browserResponse.Request.URL) {
+		if cookie.Name == "SVPNCOOKIE" {
+			browserCookies = append(browserCookies, openconnect.BrowserCookie{Name: cookie.Name, Value: cookie.Value})
+		}
+	}
+	if len(browserCookies) != 1 || browserCookies[0].Value == "" {
+		t.Fatalf("independent Fortinet SAML browser omitted SVPNCOOKIE: %#v", browserCookies)
+	}
+	completeErr := client.CompleteAuthChallenge(challenge.ID, openconnect.AuthResponse{Browser: &openconnect.BrowserResult{
+		FinalURL: browserResponse.Request.URL.String(),
+		Cookies:  browserCookies,
+	}})
+	if completeErr != nil {
+		t.Fatal(E.Cause(completeErr, "complete Fortinet SAML browser challenge"))
 	}
 }
 

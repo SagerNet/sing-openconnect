@@ -50,6 +50,7 @@ type fortinetAuthentication struct {
 	closed            bool
 	advancing         bool
 	currentInitial    bool
+	currentSAML       bool
 }
 
 type fortinetHTTPResponse struct {
@@ -169,6 +170,7 @@ func (a *fortinetAuthentication) Advance(
 	started := a.started
 	currentForm := a.currentForm
 	currentInitial := a.currentInitial
+	currentSAML := a.currentSAML
 	if !started {
 		a.started = true
 	}
@@ -183,6 +185,12 @@ func (a *fortinetAuthentication) Advance(
 			return nil, nil, E.Extend(ErrProtocolNotSupported, "unexpected form response before Fortinet authentication")
 		}
 		return a.beginAuthentication(ctx)
+	}
+	if currentSAML {
+		if response == nil || response.BrowserResult == nil {
+			return nil, nil, E.Extend(ErrProtocolNotSupported, "missing Fortinet SAML browser response")
+		}
+		return a.completeSAMLAuthentication(response.BrowserResult)
 	}
 	if response == nil || currentForm == nil {
 		return nil, nil, E.Extend(ErrProtocolNotSupported, "missing Fortinet authentication form response")
@@ -236,6 +244,12 @@ func (a *fortinetAuthentication) beginAuthentication(
 			if locationErr != nil {
 				return nil, nil, markTerminal(E.Cause(locationErr, "parse Fortinet authentication redirect"))
 			}
+			if location.Path == "/remote/saml/start" {
+				return a.beginSAMLAuthentication(location)
+			}
+			if httpResponse.requestURL.Path == "/remote/saml/start" {
+				return a.beginSAMLAuthentication(httpResponse.requestURL)
+			}
 			prepareErr := a.prepareAuthenticationRedirect(httpResponse.requestURL, location)
 			if prepareErr != nil {
 				return nil, nil, prepareErr
@@ -259,6 +273,9 @@ func (a *fortinetAuthentication) beginAuthentication(
 			currentURL = location
 			continue
 		}
+		if httpResponse.requestURL.Path == "/remote/saml/start" {
+			return a.beginSAMLAuthentication(httpResponse.requestURL)
+		}
 		if httpResponse.statusCode < http.StatusOK || httpResponse.statusCode >= http.StatusMultipleChoices {
 			return nil, nil, markTerminal(E.New("Fortinet login page returned HTTP ", httpResponse.statusCode))
 		}
@@ -269,6 +286,7 @@ func (a *fortinetAuthentication) beginAuthentication(
 		a.realm = realm
 		a.currentForm = form
 		a.currentInitial = true
+		a.currentSAML = false
 		a.access.Unlock()
 		return nil, a.buildAuthenticationRequest(form, true, ""), nil
 	}
@@ -291,8 +309,35 @@ func (a *fortinetAuthentication) processAuthenticationResponse(
 		a.access.Unlock()
 		return state, nil, nil
 	}
+	locationHeader := httpResponse.header.Get("Location")
+	if isFortinetRedirectStatus(httpResponse.statusCode) && locationHeader != "" {
+		location, locationErr := httpResponse.requestURL.Parse(locationHeader)
+		if locationErr != nil {
+			return nil, nil, markTerminal(E.Cause(locationErr, "parse Fortinet authentication redirect"))
+		}
+		if location.Path == "/remote/saml/start" {
+			return a.beginSAMLAuthentication(location)
+		}
+	}
 	switch httpResponse.statusCode {
 	case http.StatusOK:
+		if isFortinetHTMLResponse(httpResponse) {
+			a.access.Lock()
+			currentURL := cloneFortinetURL(a.currentURL)
+			realm := a.realm
+			a.access.Unlock()
+			if currentURL == nil {
+				return nil, nil, markTerminal(E.New("Fortinet authentication endpoint is empty"))
+			}
+			currentURL.Path = "/remote/saml/start"
+			currentURL.RawPath = ""
+			query := make(url.Values)
+			if realm != "" {
+				query.Set("realm", realm)
+			}
+			currentURL.RawQuery = query.Encode()
+			return a.beginSAMLAuthentication(currentURL)
+		}
 		a.access.Lock()
 		username := a.username
 		a.access.Unlock()
@@ -303,6 +348,7 @@ func (a *fortinetAuthentication) processAuthenticationResponse(
 		a.access.Lock()
 		a.currentForm = form
 		a.currentInitial = false
+		a.currentSAML = false
 		a.access.Unlock()
 		return nil, a.buildAuthenticationRequest(form, false, ""), nil
 	case http.StatusUnauthorized:
@@ -313,6 +359,7 @@ func (a *fortinetAuthentication) processAuthenticationResponse(
 		a.access.Lock()
 		a.currentForm = form
 		a.currentInitial = false
+		a.currentSAML = false
 		a.access.Unlock()
 		return nil, a.buildAuthenticationRequest(form, false, ""), nil
 	case http.StatusMethodNotAllowed:
@@ -325,6 +372,7 @@ func (a *fortinetAuthentication) processAuthenticationResponse(
 		a.access.Lock()
 		a.currentForm = previousForm
 		a.currentInitial = previousInitial
+		a.currentSAML = false
 		a.access.Unlock()
 		return nil, a.buildAuthenticationRequest(previousForm, previousInitial, "Invalid credentials; try again."), nil
 	default:
@@ -336,6 +384,97 @@ func (a *fortinetAuthentication) processAuthenticationResponse(
 		}
 		return nil, nil, markTerminal(E.New("Fortinet logincheck returned HTTP ", httpResponse.statusCode))
 	}
+}
+
+func (a *fortinetAuthentication) beginSAMLAuthentication(browserURL *url.URL) (obtainedSession, *authenticationRequest, error) {
+	validationErr := validateHTTPSRequestURL(browserURL)
+	if validationErr != nil {
+		return nil, nil, markTerminal(validationErr)
+	}
+	a.access.Lock()
+	currentURL := cloneFortinetURL(a.currentURL)
+	if currentURL == nil || !equalFortinetEndpoint(currentURL, browserURL) {
+		a.access.Unlock()
+		return nil, nil, markTerminal(E.New("Fortinet SAML authentication changed the accepted origin"))
+	}
+	browserURL = cloneFortinetURL(browserURL)
+	query := browserURL.Query()
+	query.Del("redirect")
+	browserURL.RawQuery = query.Encode()
+	a.currentForm = nil
+	a.currentInitial = false
+	a.currentSAML = true
+	a.access.Unlock()
+	return nil, &authenticationRequest{
+		FormID: "_saml",
+		Browser: &BrowserRequest{
+			URL:         browserURL.String(),
+			CookieNames: []string{"SVPNCOOKIE"},
+		},
+	}, nil
+}
+
+func (a *fortinetAuthentication) completeSAMLAuthentication(result *BrowserResult) (obtainedSession, *authenticationRequest, error) {
+	if result == nil {
+		return nil, nil, ErrInvalidBrowserAuthentication
+	}
+	a.access.Lock()
+	currentURL := cloneFortinetURL(a.currentURL)
+	jar := a.jar
+	a.access.Unlock()
+	if currentURL == nil || jar == nil {
+		return nil, nil, markTerminal(E.New("Fortinet SAML authentication state is unavailable"))
+	}
+	if result.FinalURL != "" {
+		finalURL, parseErr := url.Parse(result.FinalURL)
+		if parseErr != nil {
+			return nil, nil, E.Errors(ErrInvalidBrowserAuthentication, E.Cause(parseErr, "parse Fortinet SAML final URL"))
+		}
+		if !equalFortinetEndpoint(currentURL, finalURL) {
+			return nil, nil, E.Errors(ErrInvalidBrowserAuthentication, E.New("Fortinet SAML browser completed on an unexpected origin"))
+		}
+	}
+	var svpnCookie string
+	for _, cookie := range result.Cookies {
+		if cookie.Name == "SVPNCOOKIE" && cookie.Value != "" {
+			svpnCookie = cookie.Value
+			break
+		}
+	}
+	if svpnCookie == "" {
+		return nil, nil, E.Errors(ErrInvalidBrowserAuthentication, E.New("Fortinet SAML browser result omitted SVPNCOOKIE"))
+	}
+	jar.SetCookies(currentURL, []*http.Cookie{{
+		Name:     "SVPNCOOKIE",
+		Value:    svpnCookie,
+		Path:     "/",
+		Secure:   true,
+		HttpOnly: true,
+	}})
+	state, cookieErr := a.sessionFromCookies(currentURL)
+	if cookieErr != nil {
+		return nil, nil, cookieErr
+	}
+	if state == nil {
+		return nil, nil, E.Errors(ErrInvalidBrowserAuthentication, E.New("Fortinet SAML browser cookie was not accepted"))
+	}
+	a.access.Lock()
+	a.completed = true
+	a.currentSAML = false
+	a.access.Unlock()
+	return state, nil, nil
+}
+
+func isFortinetHTMLResponse(response fortinetHTTPResponse) bool {
+	contentType := strings.ToLower(response.header.Get("Content-Type"))
+	if strings.HasPrefix(contentType, "text/html") {
+		return true
+	}
+	trimmed := bytes.TrimSpace(response.body)
+	lowerContent := bytes.ToLower(trimmed)
+	return bytes.HasPrefix(lowerContent, []byte("<!doctype html")) ||
+		bytes.HasPrefix(lowerContent, []byte("<html")) ||
+		bytes.Contains(lowerContent, []byte("/remote/saml/"))
 }
 
 func (a *fortinetAuthentication) buildAuthenticationRequest(

@@ -45,6 +45,7 @@ MALFORMED_TRAILING_XML = os.environ.get("MALFORMED_TRAILING_XML", "0") == "1"
 MAPPED_IPV6 = os.environ.get("MAPPED_IPV6", "0") == "1"
 HTML_2FA = os.environ.get("HTML_2FA", "0") == "1"
 REJECT_FIRST_LOGIN = os.environ.get("REJECT_FIRST_LOGIN", "0") == "1"
+SAML = os.environ.get("SAML", "0") == "1"
 FAIL_DTLS_PPP = os.environ.get("FAIL_DTLS_PPP", "0") == "1"
 PPPD_MTU = int(os.environ.get("PPPD_MTU", "1320"))
 
@@ -699,6 +700,12 @@ def handle_tls_connection(connection):
                 expected_body = b"username=test&credential=test&realm=fake%2BRealm&ajax=1&just_logged_in=1"
                 if body != expected_body:
                     raise ValueError("Fortinet login query was not exact: " + repr(body))
+            if SAML:
+                send_http_response(connection, 200, {"Content-Type": "text/html"},
+                                   b"<html><body>Continue at /remote/saml/start</body></html>")
+                log("FORTINET_PEER_SAML_CHALLENGE")
+                log("FORTINET_PEER_LOGIN_QUERY_EXACT")
+                return
             with tunnel_access:
                 authentication_count += 1
                 cookie = "fortinet-full-session-{}".format(authentication_count)
@@ -709,6 +716,28 @@ def handle_tls_connection(connection):
             }, b"ret=1,redir=/remote/fortisslvpn_xml")
             log("FORTINET_PEER_AUTHENTICATED")
             log("FORTINET_PEER_LOGIN_QUERY_EXACT")
+            return
+        if parsed.path == "/remote/saml/start" and method == "GET":
+            if not SAML or urllib.parse.parse_qs(parsed.query).get("realm") != ["fake+Realm"]:
+                send_http_response(connection, 403)
+                return
+            with tunnel_access:
+                authentication_count += 1
+                cookie = "fortinet-saml-session-{}".format(authentication_count)
+                valid_cookies.add(cookie)
+                latest_cookie = cookie
+            send_http_response(connection, 302, {
+                "Location": "/sslvpn/portal/",
+                "Set-Cookie": "SVPNCOOKIE={}; Path=/; Secure; HttpOnly".format(cookie),
+            })
+            log("FORTINET_PEER_SAML_BROWSER")
+            log("FORTINET_PEER_AUTHENTICATED")
+            return
+        if parsed.path == "/sslvpn/portal/" and method == "GET":
+            if not SAML or not authenticated(headers):
+                send_http_response(connection, 403)
+                return
+            send_http_response(connection, 200, {"Content-Type": "text/html"}, b"<html>SAML complete</html>")
             return
         if parsed.path == "/remote/fortisslvpn_xml":
             if not authenticated(headers):
