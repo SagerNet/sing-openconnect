@@ -46,6 +46,11 @@ type TNCCOptions struct {
 	Certificates                 []Material
 }
 
+type FortinetHostCheckOptions struct {
+	HostCheck           string
+	CheckVirtualDesktop string
+}
+
 type FormEntry struct {
 	FormID        string
 	SubmissionKey string
@@ -93,6 +98,7 @@ type ClientOptions struct {
 	CSD                            *CSDOptions
 	HIP                            *HIPOptions
 	TNCC                           *TNCCOptions
+	FortinetHostCheck              *FortinetHostCheckOptions
 	NoUDP                          bool
 	DTLSLocalPort                  uint16
 	DTLSCipherSuites               string

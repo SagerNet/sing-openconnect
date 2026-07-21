@@ -179,7 +179,7 @@ func (f *fortinetFrontend) fetchTunnelConfiguration(
 	if !loaded {
 		return nil, "", ErrSessionRejected
 	}
-	tlsRequest, buildTLSErr := buildFortinetTLSConnectRequest(tunnelURL, snapshot.jar)
+	tlsRequest, buildTLSErr := buildFortinetTLSConnectRequest(tunnelURL, snapshot.jar, fortinetUserAgent(f.client))
 	if buildTLSErr != nil {
 		return nil, "", markTerminal(buildTLSErr)
 	}
@@ -202,7 +202,7 @@ func (f *fortinetFrontend) doConfigurationRequest(
 		return nil, nil, E.Cause(requestErr, "create Fortinet configuration request")
 	}
 	request.Header.Set("Accept-Encoding", "identity")
-	request.Header.Set("User-Agent", fortinetProtocolUserAgent)
+	request.Header.Set("User-Agent", fortinetUserAgent(f.client))
 	response, responseErr := httpClient.Do(request)
 	if responseErr != nil {
 		return nil, nil, E.Cause(responseErr, "send Fortinet configuration request")
@@ -654,7 +654,7 @@ func fortinetCookieValue(jar http.CookieJar, requestURL *url.URL) (string, bool)
 	return "", false
 }
 
-func buildFortinetTLSConnectRequest(requestURL *url.URL, jar http.CookieJar) ([]byte, error) {
+func buildFortinetTLSConnectRequest(requestURL *url.URL, jar http.CookieJar, userAgent string) ([]byte, error) {
 	port, portErr := fortinetURLPort(requestURL)
 	if portErr != nil {
 		return nil, portErr
@@ -676,7 +676,7 @@ func buildFortinetTLSConnectRequest(requestURL *url.URL, jar http.CookieJar) ([]
 	builder.WriteString("GET /remote/sslvpn-tunnel HTTP/1.1\r\nHost: ")
 	builder.WriteString(hostHeader)
 	builder.WriteString("\r\nUser-Agent: ")
-	builder.WriteString(fortinetProtocolUserAgent)
+	builder.WriteString(userAgent)
 	builder.WriteString("\r\nCookie: ")
 	for cookieIndex, cookie := range cookies {
 		if cookie.Name == "" || strings.ContainsAny(cookie.Name+cookie.Value, "\r\n;") {

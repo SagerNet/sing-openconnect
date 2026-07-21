@@ -224,6 +224,22 @@ func parseFortinetHTMLChallenge(content []byte) (*fortinetAuthenticationForm, er
 	return form, nil
 }
 
+func parseFortinetHostCheckAction(content []byte) (string, bool, error) {
+	document, parseErr := html.Parse(bytes.NewReader(content))
+	if parseErr != nil {
+		return "", false, E.Cause(parseErr, "parse Fortinet hostcheck response")
+	}
+	formNode := findFortinetHTMLNode(document, "form")
+	if formNode == nil {
+		return "", false, nil
+	}
+	action := strings.TrimSpace(fortinetHTMLAttribute(formNode, "action"))
+	if action == "" {
+		return "", false, nil
+	}
+	return action, true, nil
+}
+
 func encodeFortinetAuthenticationResponse(
 	form *fortinetAuthenticationForm,
 	response *authenticationResponse,

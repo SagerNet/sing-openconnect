@@ -59,6 +59,9 @@ type m3FortinetFullPeerCase struct {
 	token             bool
 	answer405         bool
 	saml              bool
+	hostCheck         *openconnect.FortinetHostCheckOptions
+	userAgent         string
+	authenticationErr string
 	forbiddenMarkers  []string
 	baseMTU           uint32
 }
@@ -142,6 +145,49 @@ func TestM3FortinetIndependentFullPeerMatrix(t *testing.T) {
 			expectedTunnels:   []string{"FORTINET_PEER_HTML_STYLE_CHALLENGE", "FORTINET_PEER_HTML_STYLE_RESPONSE", "FORTINET_PEER_TLS_TUNNEL_1"},
 			expectedHostDials: 4,
 			token:             true,
+		},
+		{
+			name:             "hostcheck-requires-explicit-nonempty-value",
+			environment:      map[string]string{"HOSTCHECK_ACTION": "1"},
+			expectedCarrier:  "TLS",
+			expectedTunnels:  []string{"FORTINET_PEER_HOSTCHECK_ADVERTISED", "FORTINET_PEER_TLS_TUNNEL_1"},
+			forbiddenMarkers: []string{"FORTINET_PEER_HOSTCHECK_QUERY_EXACT"},
+			hostCheck: &openconnect.FortinetHostCheckOptions{
+				CheckVirtualDesktop: "ignored-without-hostcheck",
+			},
+		},
+		{
+			name: "configured-hostcheck-full-tunnel",
+			environment: map[string]string{
+				"HOSTCHECK_ACTION":               "1",
+				"HOSTCHECK_REQUIRED":             "1",
+				"EXPECTED_HOSTCHECK":             "0100,10.0.19042",
+				"EXPECTED_CHECK_VIRTUAL_DESKTOP": "74:78:27:4d:81:93|84:1b:77:3a:95:84",
+				"EXPECTED_USER_AGENT":            "FortiSSLVPN (Windows NT; SV1 [SV{v=02.01; f=07;}])",
+			},
+			expectedCarrier:   "TLS",
+			expectedTunnels:   []string{"FORTINET_PEER_HOSTCHECK_ADVERTISED", "FORTINET_PEER_HOSTCHECK_QUERY_EXACT", "FORTINET_PEER_TLS_TUNNEL_1"},
+			expectedHostDials: 4,
+			hostCheck: &openconnect.FortinetHostCheckOptions{
+				HostCheck:           "0100,10.0.19042",
+				CheckVirtualDesktop: "74:78:27:4d:81:93|84:1b:77:3a:95:84",
+			},
+			userAgent: "FortiSSLVPN (Windows NT; SV1 [SV{v=02.01; f=07;}])",
+		},
+		{
+			name: "rejected-hostcheck-is-terminal",
+			environment: map[string]string{
+				"HOSTCHECK_ACTION":   "1",
+				"HOSTCHECK_REQUIRED": "1",
+				"HOSTCHECK_REJECT":   "1",
+			},
+			expectedHostDials: 4,
+			hostCheck: &openconnect.FortinetHostCheckOptions{
+				HostCheck: "0000,10.0.19042",
+			},
+			authenticationErr: "hostcheck returned HTTP 403",
+			expectedTunnels:   []string{"FORTINET_PEER_HOSTCHECK_ADVERTISED", "FORTINET_PEER_HOSTCHECK_REJECTED"},
+			forbiddenMarkers:  []string{"FORTINET_PEER_CONFIGURATION_", "FORTINET_PEER_TLS_TUNNEL_", "FORTINET_PEER_DTLS_TUNNEL_"},
 		},
 		{
 			name:              "http-405-clears-and-reprompts",
@@ -406,13 +452,15 @@ func runM3FortinetFullPeerCase(
 	dialer := &m3FortinetPinnedDialer{port: peer.port, maximumDials: expectedHostDials, changeSource: testCase.changeSourceIP}
 	configurationEvents := make(chan openconnect.TunnelConfigurationEvent, 16)
 	clientOptions := openconnect.ClientOptions{
-		Context:  ctx,
-		Server:   "https://" + net.JoinHostPort(m3FortinetFullPeerHostname, strconv.Itoa(int(peer.port))) + "/fake+Realm",
-		Flavor:   openconnect.FlavorFortinet,
-		Username: "test",
-		Password: "test",
-		Dialer:   dialer,
-		BaseMTU:  testCase.baseMTU,
+		Context:           ctx,
+		Server:            "https://" + net.JoinHostPort(m3FortinetFullPeerHostname, strconv.Itoa(int(peer.port))) + "/fake+Realm",
+		Flavor:            openconnect.FlavorFortinet,
+		Username:          "test",
+		Password:          "test",
+		UserAgent:         testCase.userAgent,
+		FortinetHostCheck: testCase.hostCheck,
+		Dialer:            dialer,
+		BaseMTU:           testCase.baseMTU,
 		TLSConfig: openconnect.ClientTLSOptions{
 			CertificateAuthority: openconnect.Material{Content: rootCertificate},
 		},
@@ -441,6 +489,32 @@ func runM3FortinetFullPeerCase(
 	}
 	if testCase.saml {
 		answerM3FortinetSAML(t, ctx, client, peer.port, rootCertificate)
+	}
+	if testCase.authenticationErr != "" {
+		readContext, cancelRead := context.WithTimeout(ctx, 20*time.Second)
+		_, readErr := client.ReadDataPacket(readContext)
+		cancelRead()
+		if readErr == nil || !strings.Contains(readErr.Error(), testCase.authenticationErr) {
+			t.Fatalf("Fortinet authentication did not fail specifically: %v", readErr)
+		}
+		for _, marker := range testCase.expectedTunnels {
+			waitM3FortinetPeerMarker(t, ctx, peer, marker, 10*time.Second)
+		}
+		logs := m3FortinetPeerLogs(t, ctx, peer)
+		for _, marker := range testCase.forbiddenMarkers {
+			if strings.Contains(logs, marker) {
+				t.Fatalf("failed Fortinet authentication unexpectedly reported %s:\n%s", marker, logs)
+			}
+		}
+		actualHostDials := dialer.hostnameDials.Load()
+		if actualHostDials != expectedHostDials {
+			t.Fatalf("failed Fortinet authentication used %d logical-host dials; expected %d", actualHostDials, expectedHostDials)
+		}
+		closeErr := client.Close()
+		if closeErr != nil {
+			t.Fatal(E.Cause(closeErr, "close failed Fortinet authentication"))
+		}
+		return
 	}
 	if testCase.configurationErr != "" {
 		readContext, cancelRead := context.WithTimeout(ctx, 20*time.Second)

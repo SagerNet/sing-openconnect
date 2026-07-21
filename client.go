@@ -321,6 +321,10 @@ func cloneClientOptions(options ClientOptions) ClientOptions {
 		}
 		options.TNCC = &tncc
 	}
+	if options.FortinetHostCheck != nil {
+		fortinetHostCheck := *options.FortinetHostCheck
+		options.FortinetHostCheck = &fortinetHostCheck
+	}
 	return options
 }
 

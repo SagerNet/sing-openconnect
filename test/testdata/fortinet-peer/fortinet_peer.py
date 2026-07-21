@@ -49,6 +49,12 @@ REJECT_FIRST_LOGIN = os.environ.get("REJECT_FIRST_LOGIN", "0") == "1"
 SAML = os.environ.get("SAML", "0") == "1"
 FAIL_DTLS_PPP = os.environ.get("FAIL_DTLS_PPP", "0") == "1"
 PPPD_MTU = int(os.environ.get("PPPD_MTU", "1320"))
+HOSTCHECK_ACTION = os.environ.get("HOSTCHECK_ACTION", "0") == "1"
+HOSTCHECK_REQUIRED = os.environ.get("HOSTCHECK_REQUIRED", "0") == "1"
+HOSTCHECK_REJECT = os.environ.get("HOSTCHECK_REJECT", "0") == "1"
+EXPECTED_HOSTCHECK = os.environ.get("EXPECTED_HOSTCHECK", "")
+EXPECTED_CHECK_VIRTUAL_DESKTOP = os.environ.get("EXPECTED_CHECK_VIRTUAL_DESKTOP", "")
+EXPECTED_USER_AGENT = os.environ.get("EXPECTED_USER_AGENT", "Mozilla/5.0 SV1")
 
 stop_event = threading.Event()
 tunnel_access = threading.Lock()
@@ -56,6 +62,7 @@ tunnel_count = 0
 configuration_count = 0
 authentication_count = 0
 valid_cookies = set()
+pending_hostcheck_cookies = set()
 latest_cookie = None
 login_rejected = False
 child_process_access = threading.Lock()
@@ -618,15 +625,15 @@ def validate_tunnel_request(target, headers):
         raise ValueError("unexpected tunnel path")
     if set(headers) != {"host", "user-agent", "cookie"}:
         raise ValueError("unexpected Fortinet tunnel headers " + repr(headers))
-    if (headers.get("user-agent") != "Mozilla/5.0 SV1"
+    if (headers.get("user-agent") != EXPECTED_USER_AGENT
             or headers.get("cookie") != "SVPNCOOKIE=" + current_cookie()):
         raise ValueError("invalid Fortinet tunnel user agent or cookie")
     log("FORTINET_PEER_TLS_REQUEST_EXACT")
 
 
 def validate_common_headers(headers):
-    if headers.get("user-agent") != "Mozilla/5.0 SV1":
-        raise ValueError("Fortinet protocol user agent was not forced")
+    if headers.get("user-agent") != EXPECTED_USER_AGENT:
+        raise ValueError("unexpected Fortinet protocol user agent")
 
 
 def current_cookie():
@@ -710,13 +717,53 @@ def handle_tls_connection(connection):
             with tunnel_access:
                 authentication_count += 1
                 cookie = "fortinet-full-session-{}".format(authentication_count)
-                valid_cookies.add(cookie)
+                if HOSTCHECK_REQUIRED:
+                    pending_hostcheck_cookies.add(cookie)
+                else:
+                    valid_cookies.add(cookie)
                 latest_cookie = cookie
+            response_body = b"ret=1,redir=/remote/fortisslvpn_xml"
+            if HOSTCHECK_ACTION:
+                response_body = b"""<html><body><form method="POST" action="/remote/hostcheck_validate?token=hostcheck%2Btoken"></form></body></html>"""
             send_http_response(connection, 200, {
+                "Content-Type": "text/html" if HOSTCHECK_ACTION else "text/plain",
                 "Set-Cookie": "SVPNCOOKIE={}; Path=/; Secure; HttpOnly".format(cookie),
-            }, b"ret=1,redir=/remote/fortisslvpn_xml")
+            }, response_body)
             log("FORTINET_PEER_AUTHENTICATED")
             log("FORTINET_PEER_LOGIN_QUERY_EXACT")
+            if HOSTCHECK_ACTION:
+                log("FORTINET_PEER_HOSTCHECK_ADVERTISED")
+            return
+        if parsed.path == "/remote/hostcheck_validate" and method == "POST":
+            if not HOSTCHECK_ACTION or parsed.query != "token=hostcheck%2Btoken":
+                send_http_response(connection, 403)
+                return
+            if headers.get("cookie") != "SVPNCOOKIE=" + current_cookie():
+                send_http_response(connection, 403)
+                return
+            if HOSTCHECK_REJECT:
+                send_http_response(connection, 403)
+                log("FORTINET_PEER_HOSTCHECK_REJECTED")
+                return
+            values = urllib.parse.parse_qs(body.decode(), keep_blank_values=True)
+            if (values.get("hostcheck") != [EXPECTED_HOSTCHECK]
+                    or values.get("check_virtual_desktop") != [EXPECTED_CHECK_VIRTUAL_DESKTOP]):
+                raise ValueError("unexpected Fortinet hostcheck values " + repr(values))
+            expected_body = urllib.parse.urlencode([
+                ("hostcheck", EXPECTED_HOSTCHECK),
+                ("check_virtual_desktop", EXPECTED_CHECK_VIRTUAL_DESKTOP),
+            ]).encode()
+            if body != expected_body:
+                raise ValueError("Fortinet hostcheck query was not exact: " + repr(body))
+            if HOSTCHECK_REQUIRED:
+                cookie = current_cookie()
+                with tunnel_access:
+                    if cookie not in pending_hostcheck_cookies:
+                        raise ValueError("Fortinet hostcheck cookie was not pending")
+                    pending_hostcheck_cookies.remove(cookie)
+                    valid_cookies.add(cookie)
+            send_http_response(connection, 200, body=b"hostcheck accepted")
+            log("FORTINET_PEER_HOSTCHECK_QUERY_EXACT")
             return
         if parsed.path == "/remote/saml/start" and method == "GET":
             if not SAML or urllib.parse.parse_qs(parsed.query).get("realm") != ["fake+Realm"]:

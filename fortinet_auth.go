@@ -240,7 +240,7 @@ func (a *fortinetAuthentication) Advance(
 	if requestErr != nil {
 		return nil, nil, requestErr
 	}
-	return a.processAuthenticationResponse(httpResponse, currentForm, currentInitial)
+	return a.processAuthenticationResponse(ctx, httpResponse, currentForm, currentInitial)
 }
 
 func (a *fortinetAuthentication) beginAuthentication(
@@ -311,6 +311,7 @@ func (a *fortinetAuthentication) beginAuthentication(
 }
 
 func (a *fortinetAuthentication) processAuthenticationResponse(
+	ctx context.Context,
 	httpResponse fortinetHTTPResponse,
 	previousForm *fortinetAuthenticationForm,
 	previousInitial bool,
@@ -321,6 +322,20 @@ func (a *fortinetAuthentication) processAuthenticationResponse(
 		return nil, nil, cookieErr
 	}
 	if state != nil {
+		hostCheckOptions := a.frontend.client.options.FortinetHostCheck
+		if hostCheckOptions != nil && hostCheckOptions.HostCheck != "" {
+			hostCheckAction, loaded, parseErr := parseFortinetHostCheckAction(httpResponse.body)
+			if parseErr != nil {
+				return nil, nil, markTerminal(parseErr)
+			}
+			if loaded {
+				hostCheckState, hostCheckErr := a.submitHostCheck(ctx, httpResponse.requestURL, hostCheckAction, *hostCheckOptions)
+				if hostCheckErr != nil {
+					return nil, nil, hostCheckErr
+				}
+				state = hostCheckState
+			}
+		}
 		a.access.Lock()
 		a.completed = true
 		a.currentForm = nil
@@ -402,6 +417,43 @@ func (a *fortinetAuthentication) processAuthenticationResponse(
 		}
 		return nil, nil, markTerminal(E.New("logincheck returned HTTP ", httpResponse.statusCode))
 	}
+}
+
+func (a *fortinetAuthentication) submitHostCheck(
+	ctx context.Context,
+	responseURL *url.URL,
+	action string,
+	options FortinetHostCheckOptions,
+) (*fortinetSessionState, error) {
+	requestURL, resolveErr := responseURL.Parse(action)
+	if resolveErr != nil {
+		return nil, markTerminal(E.Cause(resolveErr, "resolve Fortinet hostcheck action"))
+	}
+	if !equalFortinetEndpoint(responseURL, requestURL) {
+		return nil, markTerminal(E.New("hostcheck action changed the accepted origin"))
+	}
+	validationErr := validateHTTPSRequestURL(requestURL)
+	if validationErr != nil {
+		return nil, markTerminal(validationErr)
+	}
+	encodedForm := "hostcheck=" + url.QueryEscape(options.HostCheck) +
+		"&check_virtual_desktop=" + url.QueryEscape(options.CheckVirtualDesktop)
+	httpResponse, requestErr := a.doAuthenticationRequest(ctx, http.MethodPost, requestURL, encodedForm)
+	if requestErr != nil {
+		return nil, requestErr
+	}
+	a.rememberHTTPResponse(httpResponse)
+	if httpResponse.statusCode < http.StatusOK || httpResponse.statusCode >= http.StatusMultipleChoices {
+		return nil, markTerminal(E.New("hostcheck returned HTTP ", httpResponse.statusCode))
+	}
+	state, cookieErr := a.sessionFromCookies(httpResponse.requestURL)
+	if cookieErr != nil {
+		return nil, cookieErr
+	}
+	if state == nil {
+		return nil, markTerminal(E.New("hostcheck response omitted SVPNCOOKIE"))
+	}
+	return state, nil
 }
 
 func (a *fortinetAuthentication) beginSAMLAuthentication(browserURL *url.URL) (obtainedSession, *authenticationRequest, error) {
@@ -584,7 +636,7 @@ func (a *fortinetAuthentication) doAuthenticationRequest(
 		return fortinetHTTPResponse{}, markTerminal(E.Cause(requestErr, "create Fortinet authentication request"))
 	}
 	request.Header.Set("Accept-Encoding", "identity")
-	request.Header.Set("User-Agent", fortinetProtocolUserAgent)
+	request.Header.Set("User-Agent", fortinetUserAgent(a.frontend.client))
 	if method == http.MethodPost {
 		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
@@ -750,6 +802,13 @@ func equalFortinetEndpoint(left *url.URL, right *url.URL) bool {
 	return leftErr == nil && rightErr == nil && leftPort == rightPort
 }
 
+func fortinetUserAgent(client *Client) string {
+	if client.options.UserAgent != "" {
+		return client.options.UserAgent
+	}
+	return fortinetProtocolUserAgent
+}
+
 func fortinetURLPort(serverURL *url.URL) (uint16, error) {
 	if serverURL == nil {
 		return 0, E.New("endpoint URL is empty")
@@ -881,7 +940,7 @@ func (f *fortinetFrontend) logout(ctx context.Context, snapshot fortinetSessionS
 		return E.Cause(requestErr, "create Fortinet logout request")
 	}
 	request.Header.Set("Accept-Encoding", "identity")
-	request.Header.Set("User-Agent", fortinetProtocolUserAgent)
+	request.Header.Set("User-Agent", fortinetUserAgent(f.client))
 	response, responseErr := logoutClient.Do(request)
 	if responseErr != nil {
 		return E.Cause(responseErr, "send Fortinet logout request")
