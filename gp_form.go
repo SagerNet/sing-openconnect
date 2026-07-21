@@ -32,7 +32,7 @@ const (
 	gpMinimumShortHIPReportInterval = time.Second
 )
 
-var errGPInterfaceNotFound = E.New("GlobalProtect interface does not exist")
+var errGPInterfaceNotFound = E.New("interface does not exist")
 
 type gpPreloginForm struct {
 	message       string
@@ -128,7 +128,7 @@ func parseGPPreloginResponse(responseBody []byte) (gpPreloginForm, error) {
 		return gpPreloginForm{}, err
 	}
 	if challengeFound {
-		return gpPreloginForm{}, E.Extend(ErrProtocolNotSupported, "GlobalProtect prelogin returned an authentication challenge")
+		return gpPreloginForm{}, E.Extend(ErrProtocolNotSupported, "prelogin returned an authentication challenge")
 	}
 	var prelogin gpPreloginXML
 	err = decodeGPXML(responseBody, &prelogin, "parse GlobalProtect prelogin XML")
@@ -136,10 +136,10 @@ func parseGPPreloginResponse(responseBody []byte) (gpPreloginForm, error) {
 		return gpPreloginForm{}, err
 	}
 	if prelogin.XMLName.Local != "prelogin-response" {
-		return gpPreloginForm{}, E.New("GlobalProtect prelogin returned unexpected XML root: ", prelogin.XMLName.Local)
+		return gpPreloginForm{}, E.New("prelogin returned unexpected XML root: ", prelogin.XMLName.Local)
 	}
 	if strings.TrimSpace(prelogin.Status) != "Success" {
-		return gpPreloginForm{}, E.New("GlobalProtect prelogin failed: ", strings.TrimSpace(prelogin.Message))
+		return gpPreloginForm{}, E.New("prelogin failed: ", strings.TrimSpace(prelogin.Message))
 	}
 	return gpPreloginForm{
 		message:       strings.TrimSpace(prelogin.AuthenticationMessage),
@@ -165,7 +165,7 @@ func parseGPPortalConfiguration(responseBody []byte, region string) (gpPortalCon
 		return gpPortalConfiguration{}, nil, err
 	}
 	if policy.XMLName.Local != "policy" {
-		return gpPortalConfiguration{}, nil, E.New("GlobalProtect portal returned unexpected XML root: ", policy.XMLName.Local)
+		return gpPortalConfiguration{}, nil, E.New("portal returned unexpected XML root: ", policy.XMLName.Local)
 	}
 	configuration := gpPortalConfiguration{
 		portalUserAuthCookie:         normalizeGPPortalCookie(policy.PortalUserAuthCookie),
@@ -179,7 +179,7 @@ func parseGPPortalConfiguration(responseBody []byte, region string) (gpPortalCon
 	for i, gatewayXML := range policy.Gateways {
 		gatewayName := strings.TrimSpace(gatewayXML.Name)
 		if gatewayName == "" {
-			return gpPortalConfiguration{}, nil, E.New("GlobalProtect portal returned a gateway without an endpoint name")
+			return gpPortalConfiguration{}, nil, E.New("portal returned a gateway without an endpoint name")
 		}
 		gatewayLabel := strings.TrimSpace(gatewayXML.Description)
 		if gatewayLabel == "" {
@@ -197,7 +197,7 @@ func parseGPPortalConfiguration(responseBody []byte, region string) (gpPortalCon
 		})
 	}
 	if len(configuration.gateways) == 0 {
-		return gpPortalConfiguration{}, nil, E.New("GlobalProtect portal configuration lists no gateway servers")
+		return gpPortalConfiguration{}, nil, E.New("portal configuration lists no gateway servers")
 	}
 	sort.SliceStable(configuration.gateways, func(i int, j int) bool {
 		return configuration.gateways[i].priority < configuration.gateways[j].priority
@@ -219,10 +219,10 @@ func parseGPLoginResponse(responseBody []byte, localHostname string) (string, *g
 		return "", nil, err
 	}
 	if jnlp.XMLName.Local != "jnlp" {
-		return "", nil, E.New("GlobalProtect gateway login returned unexpected XML root: ", jnlp.XMLName.Local)
+		return "", nil, E.New("gateway login returned unexpected XML root: ", jnlp.XMLName.Local)
 	}
 	if len(jnlp.ApplicationDescription.Unexpected) > 0 {
-		return "", nil, E.New("GlobalProtect gateway login returned unexpected JNLP element: ", jnlp.ApplicationDescription.Unexpected[0].XMLName.Local)
+		return "", nil, E.New("gateway login returned unexpected JNLP element: ", jnlp.ApplicationDescription.Unexpected[0].XMLName.Local)
 	}
 	arguments := make([]string, gpLoginKnownArgumentCount)
 	copy(arguments, jnlp.ApplicationDescription.Arguments)
@@ -231,16 +231,16 @@ func parseGPLoginResponse(responseBody []byte, localHostname string) (string, *g
 	connectionType := normalizeGPLoginArgument(arguments[gpLoginArgumentConnectionType])
 	clientVersion := normalizeGPLoginArgument(arguments[gpLoginArgumentClientVersion])
 	if authCookie == "" {
-		return "", nil, E.New("GlobalProtect gateway login omitted authcookie")
+		return "", nil, E.New("gateway login omitted authcookie")
 	}
 	if user == "" {
-		return "", nil, E.New("GlobalProtect gateway login omitted user")
+		return "", nil, E.New("gateway login omitted user")
 	}
 	if connectionType != "tunnel" {
-		return "", nil, E.New("GlobalProtect gateway login returned connection-type ", connectionType, ", expected tunnel")
+		return "", nil, E.New("gateway login returned connection-type ", connectionType, ", expected tunnel")
 	}
 	if clientVersion != "4100" {
-		return "", nil, E.New("GlobalProtect gateway login returned clientVer ", clientVersion, ", expected 4100")
+		return "", nil, E.New("gateway login returned clientVer ", clientVersion, ", expected 4100")
 	}
 	parameterArguments := []struct {
 		name  string
@@ -272,7 +272,7 @@ func parseGPLogoutResponse(responseBody []byte) error {
 		return err
 	}
 	if challengeFound {
-		return E.New("GlobalProtect logout unexpectedly returned an authentication challenge")
+		return E.New("logout unexpectedly returned an authentication challenge")
 	}
 	var envelope gpResponseEnvelope
 	err = decodeGPXML(responseBody, &envelope, "parse GlobalProtect logout XML")
@@ -280,7 +280,7 @@ func parseGPLogoutResponse(responseBody []byte) error {
 		return err
 	}
 	if envelope.XMLName.Local != "response" || envelope.Status != "success" {
-		return E.New("GlobalProtect logout did not return a successful response")
+		return E.New("logout did not return a successful response")
 	}
 	return nil
 }
@@ -293,12 +293,12 @@ func decodeGPSAMLURL(method string, request string) (string, error) {
 			return "", E.Cause(err, "decode GlobalProtect SAML REDIRECT request")
 		}
 		if len(decoded) == 0 {
-			return "", E.New("GlobalProtect SAML REDIRECT request is empty")
+			return "", E.New("SAML REDIRECT request is empty")
 		}
 		return string(decoded), nil
 	case "POST":
 		if request == "" {
-			return "", E.New("GlobalProtect SAML POST request is empty")
+			return "", E.New("SAML POST request is empty")
 		}
 		return "data:text/html;base64," + request, nil
 	default:
@@ -310,7 +310,7 @@ func decodeGPSAMLURL(method string, request string) (string, error) {
 func inspectGPResponse(responseBody []byte) (gpChallenge, bool, error) {
 	response := strings.TrimSpace(string(responseBody))
 	if response == "" {
-		return gpChallenge{}, false, E.New("GlobalProtect server returned an empty response")
+		return gpChallenge{}, false, E.New("server returned an empty response")
 	}
 	if strings.HasPrefix(response, "var respStatus") {
 		return parseGPJavaScriptChallenge(response)
@@ -326,7 +326,7 @@ func inspectGPResponse(responseBody []byte) (gpChallenge, bool, error) {
 		message, messageFound := extractGPElement(withoutDeclaration, "respmsg")
 		inputString, inputFound := extractGPElement(withoutDeclaration, "inputstr")
 		if !messageFound || !inputFound {
-			return gpChallenge{}, false, E.New("GlobalProtect XML challenge omitted respmsg or inputstr")
+			return gpChallenge{}, false, E.New("XML challenge omitted respmsg or inputstr")
 		}
 		return gpChallenge{message: message, inputString: inputString}, true, nil
 	}
@@ -370,14 +370,14 @@ func parseGPJavaScriptChallenge(response string) (gpChallenge, bool, error) {
 		return gpChallenge{}, false, E.New("failed to parse GlobalProtect JavaScript challenge inputStr")
 	}
 	if strings.Trim(remaining, "; \t\r\n") != "" {
-		return gpChallenge{}, false, E.New("GlobalProtect JavaScript challenge contains unexpected trailing input")
+		return gpChallenge{}, false, E.New("JavaScript challenge contains unexpected trailing input")
 	}
 	decodedMessage := decodeGPJavaScriptString(message)
 	if strings.HasPrefix(status, "Error") {
-		return gpChallenge{}, false, E.New("GlobalProtect authentication failed: ", decodedMessage)
+		return gpChallenge{}, false, E.New("authentication failed: ", decodedMessage)
 	}
 	if !strings.HasPrefix(status, "Challenge") {
-		return gpChallenge{}, false, E.New("GlobalProtect JavaScript response returned unknown status: ", status)
+		return gpChallenge{}, false, E.New("JavaScript response returned unknown status: ", status)
 	}
 	return gpChallenge{message: decodedMessage, inputString: inputString}, true, nil
 }
@@ -442,9 +442,9 @@ func classifyGPResponseError(message string) error {
 		return E.Extend(ErrProtocolNotSupported, message)
 	default:
 		if message == "" {
-			return E.Extend(ErrProtocolNotSupported, "GlobalProtect server returned an unspecified error")
+			return E.Extend(ErrProtocolNotSupported, "server returned an unspecified error")
 		}
-		return E.Extend(ErrProtocolNotSupported, "GlobalProtect server returned an error: ", message)
+		return E.Extend(ErrProtocolNotSupported, "server returned an error: ", message)
 	}
 }
 
@@ -465,13 +465,13 @@ func parseGPHIPReportInterval(value string) (time.Duration, error) {
 		return 0, E.Cause(err, "parse GlobalProtect HIP report interval")
 	}
 	if seconds < 0 {
-		return 0, E.New("GlobalProtect HIP report interval is negative: ", seconds)
+		return 0, E.New("HIP report interval is negative: ", seconds)
 	}
 	if seconds == 0 {
 		return 0, nil
 	}
 	if seconds > math.MaxInt64/int64(time.Second) {
-		return 0, E.New("GlobalProtect HIP report interval exceeds the supported duration: ", seconds)
+		return 0, E.New("HIP report interval exceeds the supported duration: ", seconds)
 	}
 	interval := time.Duration(seconds) * time.Second
 	if interval > gpPortalHIPReportIntervalLead {

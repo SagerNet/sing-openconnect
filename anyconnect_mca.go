@@ -33,10 +33,10 @@ var anyConnectMCAHashes = []anyConnectMCAHash{
 
 func buildAnyConnectMCAResponse(client *Client, identity *mcaIdentity, form anyConnectForm) ([]byte, error) {
 	if client == nil || identity == nil || identity.Signer == nil {
-		return nil, E.New("AnyConnect multiple-certificate authentication requires an MCA identity")
+		return nil, E.New("multiple-certificate authentication requires an MCA identity")
 	}
 	if len(form.RawResponse) == 0 {
-		return nil, E.New("AnyConnect multiple-certificate request omitted the raw challenge response")
+		return nil, E.New("multiple-certificate request omitted the raw challenge response")
 	}
 	certificateData, err := marshalAnyConnectMCACertificates(identity.Certificate)
 	if err != nil {
@@ -143,7 +143,7 @@ func buildAnyConnectMCAResponse(client *Client, identity *mcaIdentity, form anyC
 
 func marshalAnyConnectMCACertificates(certificates [][]byte) ([]byte, error) {
 	if len(certificates) == 0 {
-		return nil, E.New("AnyConnect MCA identity has no certificates")
+		return nil, E.New("MCA identity has no certificates")
 	}
 	var certificateChain bytes.Buffer
 	for i, certificateData := range certificates {
@@ -162,7 +162,7 @@ func marshalAnyConnectMCACertificates(certificates [][]byte) ([]byte, error) {
 
 func signAnyConnectMCAChallenge(signer crypto.Signer, offeredMethods []string, challenge []byte) (string, []byte, error) {
 	if len(challenge) == 0 {
-		return "", nil, E.New("AnyConnect MCA challenge is empty")
+		return "", nil, E.New("MCA challenge is empty")
 	}
 	switch signer.Public().(type) {
 	case *rsa.PublicKey, *ecdsa.PublicKey:
@@ -200,7 +200,7 @@ func signAnyConnectMCAChallenge(signer crypto.Signer, offeredMethods []string, c
 		return method.name, signature, nil
 	}
 	if !foundCommonMethod {
-		return "", nil, E.New("AnyConnect MCA signature hash negotiation failed; gateway offered: ", strings.Join(offeredMethods, ", "))
+		return "", nil, E.New("MCA signature hash negotiation failed; gateway offered: ", strings.Join(offeredMethods, ", "))
 	}
 	return "", nil, E.Cause(E.Errors(signingErrors...), "generate AnyConnect MCA signature")
 }

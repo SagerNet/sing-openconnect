@@ -126,11 +126,22 @@ func (c *anyConnectDTLSChannel) WriteDataPacket(payload []byte) error {
 }
 
 func (c *anyConnectDTLSChannel) WriteDataPacketBuffer(packetBuffer **buf.Buffer) error {
-	*packetBuffer = requirePacketBufferCapacity(*packetBuffer, 1, 0)
-	header := (*packetBuffer).ExtendHeader(1)
-	header[0] = cstpPacketData
-	err := c.writePacket((*packetBuffer).Bytes())
-	(*packetBuffer).Advance(1)
+	packetType := cstpPacketData
+	outgoingBuffer := packetBuffer
+	var compressedPacket *buf.Buffer
+	compressedPacket, compressed := compressAnyConnectStatelessPacket(c.negotiation.Compression, (*packetBuffer).Bytes())
+	if compressed {
+		outgoingBuffer = &compressedPacket
+		packetType = cstpPacketCompressed
+	}
+	*outgoingBuffer = requirePacketBufferCapacity(*outgoingBuffer, 1, 0)
+	header := (*outgoingBuffer).ExtendHeader(1)
+	header[0] = packetType
+	err := c.writePacket((*outgoingBuffer).Bytes())
+	(*outgoingBuffer).Advance(1)
+	if compressedPacket != nil {
+		compressedPacket.Release()
+	}
 	return err
 }
 
@@ -163,10 +174,8 @@ func (c *anyConnectDTLSChannel) writePacket(packet []byte) error {
 
 func (c *anyConnectDTLSChannel) readLoop() {
 	defer c.waitGroup.Done()
-	bufferSize := 64 * 1024
-	if c.negotiation.MTU > bufferSize {
-		bufferSize = c.negotiation.MTU + 1
-	}
+	maximumPayloadSize := max(16384, c.negotiation.MTU)
+	bufferSize := maximumPayloadSize + 1
 	for {
 		c.access.RLock()
 		conn := c.conn
@@ -208,9 +217,25 @@ func (c *anyConnectDTLSChannel) readLoop() {
 		case cstpPacketDPDResponse, cstpPacketKeepalive:
 			packetBuffer.Release()
 		case cstpPacketCompressed:
+			if c.negotiation.Compression == anyConnectCompressionNone {
+				packetBuffer.Release()
+				c.terminate(E.Extend(ErrProtocolNotSupported, "received compressed DTLS packet without negotiated compression"))
+				return
+			}
+			packetBuffer.Advance(1)
+			decompressedPacket, decompressErr := decompressAnyConnectStatelessPacket(c.negotiation.Compression, packetBuffer.Bytes(), maximumPayloadSize)
 			packetBuffer.Release()
-			c.terminate(E.Extend(ErrProtocolNotSupported, "received compressed DTLS packet without negotiated compression"))
-			return
+			if decompressErr != nil {
+				if c.negotiation.Logger != nil {
+					c.negotiation.Logger.DebugContext(c.ctx, "Ignoring invalid ", c.negotiation.Compression.String(), "-compressed DTLS packet: ", decompressErr)
+				}
+				continue
+			}
+			if c.deliver != nil {
+				c.deliver(decompressedPacket)
+			} else {
+				decompressedPacket.Release()
+			}
 		default:
 			packetBuffer.Release()
 			// Upstream dtls_mainloop ignores unknown packet types because some OpenSSL versions return out-of-order record garbage in non-blocking mode.

@@ -92,11 +92,22 @@ func openNCONCPConnection(
 	if err != nil {
 		return nil, nil, markTerminal(err)
 	}
-	destination := M.ParseSocksaddrHostPort(snapshot.acceptedAddress.String(), serverPort)
+	destinationHost := snapshot.serverURL.Hostname()
+	if snapshot.acceptedAddress.IsValid() {
+		destinationHost = snapshot.acceptedAddress.String()
+	}
+	destination := M.ParseSocksaddrHostPort(destinationHost, serverPort)
 	dialer := client.options.Dialer
 	rawConnection, err := dialer.DialContext(ctx, N.NetworkTCP, destination)
 	if err != nil {
 		return nil, nil, E.Cause(err, "connect Network Connect oNCP TCP transport")
+	}
+	if !snapshot.acceptedAddress.IsValid() {
+		snapshot.acceptedAddress = parseAnyConnectRemoteAddress(rawConnection.RemoteAddr())
+	}
+	if !snapshot.acceptedAddress.IsValid() {
+		_ = rawConnection.Close()
+		return nil, nil, markTerminal(E.New("oNCP endpoint did not expose an accepted IP address"))
 	}
 	setupComplete := false
 	defer func() {
@@ -118,7 +129,7 @@ func openNCONCPConnection(
 		return nil, nil, E.Cause(err, "set Network Connect oNCP connection deadline")
 	}
 	tlsConfiguration := client.tlsConfig.Clone()
-	if client.options.TLSConfig.Config == nil || client.options.TLSConfig.Config.ServerName == "" {
+	if tlsConfiguration.ServerName == "" {
 		tlsConfiguration.ServerName = snapshot.serverURL.Hostname()
 	}
 	tlsConfiguration.NextProtos = []string{"http/1.1"}
@@ -152,7 +163,7 @@ func openNCONCPConnection(
 		return nil, nil, ErrSessionRejected
 	}
 	if statusCode != http.StatusOK {
-		statusErr := E.New("Network Connect oNCP endpoint returned HTTP ", statusCode)
+		statusErr := E.New("oNCP endpoint returned HTTP ", statusCode)
 		return nil, nil, markTerminal(E.Errors(ErrProtocolNotSupported, statusErr))
 	}
 	authenticationPacket, err := encodeNCONCPAuthenticationPacket(localHostname)
@@ -213,7 +224,7 @@ func buildNCONCPRequest(client *Client, snapshot ncSessionSnapshot) ([]byte, err
 		encodedCookies = append(encodedCookies, (&http.Cookie{Name: "DSID", Value: snapshot.dsid}).String())
 	}
 	if len(encodedCookies) == 0 {
-		return nil, E.New("Network Connect oNCP request has no cookies")
+		return nil, E.New("oNCP request has no cookies")
 	}
 	var request strings.Builder
 	request.WriteString("POST /dana/js?prot=1&svc=4 HTTP/1.1\r\nConnection: close\r\nHost: ")
@@ -229,7 +240,7 @@ func buildNCONCPRequest(client *Client, snapshot ncSessionSnapshot) ([]byte, err
 func encodeNCONCPAuthenticationPacket(localHostname string) ([]byte, error) {
 	packetLength := len(ncONCPAuthenticationHead) + 2 + len(localHostname) + len(ncONCPAuthenticationTail)
 	if packetLength > ncONCPMaximumKMPPayload || len(localHostname) > ncONCPMaximumKMPPayload {
-		return nil, E.New("Network Connect oNCP local hostname is too long")
+		return nil, E.New("oNCP local hostname is too long")
 	}
 	packet := make([]byte, 2, packetLength+2)
 	binary.LittleEndian.PutUint16(packet, uint16(packetLength))
@@ -248,10 +259,10 @@ func (c *ncONCPConnection) readInitialConfiguration() ([]byte, []byte, error) {
 		return nil, nil, err
 	}
 	if len(record) < 1 {
-		return nil, nil, markTerminal(E.New("Network Connect oNCP hostname response is empty"))
+		return nil, nil, markTerminal(E.New("oNCP hostname response is empty"))
 	}
 	if record[0] != 0 {
-		return nil, nil, markTerminal(E.New("Network Connect oNCP hostname response returned error ", record[0]))
+		return nil, nil, markTerminal(E.New("oNCP hostname response returned error ", record[0]))
 	}
 	configurationBytes := append([]byte(nil), record[1:]...)
 	var pendingPackets []byte
@@ -265,7 +276,7 @@ func (c *ncONCPConnection) readInitialConfiguration() ([]byte, []byte, error) {
 			}
 			if messageType != ncONCPKMPConfiguration {
 				clear(configurationBytes)
-				return nil, nil, markTerminal(E.New("Network Connect oNCP expected KMP 301, received ", messageType))
+				return nil, nil, markTerminal(E.New("oNCP expected KMP 301, received ", messageType))
 			}
 			totalLength := ncONCPKMPHeaderSize + payloadLength
 			if len(configurationBytes) >= totalLength {
@@ -286,20 +297,20 @@ func (c *ncONCPConnection) readInitialConfiguration() ([]byte, []byte, error) {
 		if recordCount > ncONCPMaximumInitialRecords {
 			clear(configurationBytes)
 			clear(pendingPackets)
-			return nil, nil, markTerminal(E.New("Network Connect oNCP initial configuration used too many records"))
+			return nil, nil, markTerminal(E.New("oNCP initial configuration used too many records"))
 		}
 		if isNCONCPStandaloneDataRecord(record) {
 			if len(pendingPackets)+len(record) > ncONCPMaximumInitialPending {
 				clear(configurationBytes)
 				clear(pendingPackets)
-				return nil, nil, markTerminal(E.New("Network Connect oNCP queued too much data during initial configuration"))
+				return nil, nil, markTerminal(E.New("oNCP queued too much data during initial configuration"))
 			}
 			pendingPackets = append(pendingPackets, record...)
 			continue
 		}
 		if len(configurationBytes)+len(record) > ncONCPKMPHeaderSize+ncONCPMaximumKMPPayload {
 			clear(configurationBytes)
-			return nil, nil, markTerminal(E.New("Network Connect oNCP initial configuration is too large"))
+			return nil, nil, markTerminal(E.New("oNCP initial configuration is too large"))
 		}
 		configurationBytes = append(configurationBytes, record...)
 	}
@@ -370,7 +381,7 @@ func (c *ncONCPConnection) readRecord() ([]byte, error) {
 		if err != nil {
 			return nil, E.Cause(err, "read Network Connect oNCP termination reason")
 		}
-		reasonErr := E.New("Network Connect oNCP server terminated the session with reason ", reason[0])
+		reasonErr := E.New("oNCP server terminated the session with reason ", reason[0])
 		if reason[0] == 1 {
 			return nil, E.Errors(ErrSessionRejected, reasonErr)
 		}
@@ -398,7 +409,7 @@ func (c *ncONCPConnection) readRecordBuffer() (*buf.Buffer, error) {
 		if err != nil {
 			return nil, E.Cause(err, "read Network Connect oNCP termination reason")
 		}
-		reasonErr := E.New("Network Connect oNCP server terminated the session with reason ", reason[0])
+		reasonErr := E.New("oNCP server terminated the session with reason ", reason[0])
 		if reason[0] == 1 {
 			return nil, E.Errors(ErrSessionRejected, reasonErr)
 		}
@@ -415,7 +426,7 @@ func (c *ncONCPConnection) readRecordBuffer() (*buf.Buffer, error) {
 
 func (c *ncONCPConnection) writeRecord(content []byte) error {
 	if len(content) == 0 || len(content) > ncONCPMaximumKMPPayload {
-		return E.New("Network Connect oNCP record has invalid length: ", len(content))
+		return E.New("oNCP record has invalid length: ", len(content))
 	}
 	record := make([]byte, 2, len(content)+2)
 	binary.LittleEndian.PutUint16(record, uint16(len(content)))
@@ -432,13 +443,13 @@ func (c *ncONCPConnection) writeKMPPacketBuffers(messageType uint16, packetBuffe
 		payloadLength := packetBuffer.Len()
 		if payloadLength > ncONCPMaximumKMPPayload {
 			validPacketBuffers = packetBuffers[:index]
-			validationErr = E.New("Network Connect oNCP KMP payload is too large: ", payloadLength)
+			validationErr = E.New("oNCP KMP payload is too large: ", payloadLength)
 			break
 		}
 		messageLength := ncONCPKMPHeaderSize + payloadLength
 		if messageLength > ncONCPMaximumKMPPayload {
 			validPacketBuffers = packetBuffers[:index]
-			validationErr = E.New("Network Connect oNCP record has invalid length: ", messageLength)
+			validationErr = E.New("oNCP record has invalid length: ", messageLength)
 			break
 		}
 		packetBuffers[index] = requirePacketBufferCapacity(packetBuffer, 2+ncONCPKMPHeaderSize, 0)
@@ -453,7 +464,7 @@ func (c *ncONCPConnection) writeKMPPacketBuffers(messageType uint16, packetBuffe
 		return validationErr
 	}
 	c.writeAccess.Lock()
-	err := writePacketBufferSequence(c.Conn, validPacketBuffers)
+	err := writeByteSequence(c.Conn, buf.ToSliceMulti(validPacketBuffers))
 	c.writeAccess.Unlock()
 	if err != nil {
 		return E.Cause(err, "write Network Connect oNCP bytes")
@@ -470,7 +481,7 @@ func (c *ncONCPConnection) writeBytes(content []byte) error {
 			return E.Cause(err, "write Network Connect oNCP bytes")
 		}
 		if n <= 0 || n > len(content) {
-			return E.New("Network Connect oNCP write made invalid progress: ", n)
+			return E.New("oNCP write made invalid progress: ", n)
 		}
 		content = content[n:]
 	}
@@ -479,7 +490,7 @@ func (c *ncONCPConnection) writeBytes(content []byte) error {
 
 func parseNCONCPKMPHeader(header []byte, outgoing bool) (uint16, int, error) {
 	if len(header) < ncONCPKMPHeaderSize || !bytes.Equal(header[:6], ncONCPKMPHead) {
-		return 0, 0, markTerminal(E.New("Network Connect oNCP KMP header is invalid"))
+		return 0, 0, markTerminal(E.New("oNCP KMP header is invalid"))
 	}
 	expectedTail := ncONCPKMPTail
 	if outgoing {
@@ -489,7 +500,7 @@ func parseNCONCPKMPHeader(header []byte, outgoing bool) (uint16, int, error) {
 		messageType := binary.BigEndian.Uint16(header[6:8])
 		legacyDataTail := messageType == ncONCPKMPData && header[8] == 0 && bytes.Equal(header[9:18], ncONCPKMPTail[1:])
 		if !legacyDataTail {
-			return 0, 0, markTerminal(E.New("Network Connect oNCP KMP constants are invalid"))
+			return 0, 0, markTerminal(E.New("oNCP KMP constants are invalid"))
 		}
 	}
 	return binary.BigEndian.Uint16(header[6:8]), int(binary.BigEndian.Uint16(header[18:20])), nil
@@ -497,7 +508,7 @@ func parseNCONCPKMPHeader(header []byte, outgoing bool) (uint16, int, error) {
 
 func encodeNCONCPKMP(messageType uint16, payload []byte) ([]byte, error) {
 	if len(payload) > ncONCPMaximumKMPPayload {
-		return nil, E.New("Network Connect oNCP KMP payload is too large: ", len(payload))
+		return nil, E.New("oNCP KMP payload is too large: ", len(payload))
 	}
 	message := make([]byte, ncONCPKMPHeaderSize, ncONCPKMPHeaderSize+len(payload))
 	copy(message[:6], ncONCPKMPHead)
@@ -525,12 +536,17 @@ func parseNCONCPInitialConfiguration(
 		return nil, nil, err
 	}
 	if messageType != ncONCPKMPConfiguration || payloadLength != len(message)-ncONCPKMPHeaderSize {
-		return nil, nil, markTerminal(E.New("Network Connect oNCP initial KMP 301 length is invalid"))
+		return nil, nil, markTerminal(E.New("oNCP initial KMP 301 length is invalid"))
 	}
 	configuration, espParameters, err := parseNCONCPConfigurationPayload(message[ncONCPKMPHeaderSize:])
 	if err != nil {
 		return nil, nil, err
 	}
+	configuration.configuration.RemoteAddress = acceptedAddress.Unmap()
+	configuration.configuration = normalizeTunnelConfiguration(
+		configuration.configuration,
+		client.options.IPv6Disabled,
+	)
 	responsePayload := encodeNCONCPMTUControlPayload(configuration.configuration.MTU)
 	response, err := encodeNCONCPKMP(ncONCPKMPControl, responsePayload)
 	clear(responsePayload)
@@ -548,6 +564,9 @@ func parseNCONCPInitialConfiguration(
 		} else if espErr != nil && client.options.Logger != nil {
 			client.options.Logger.WarnContext(client.options.Context, "Ignoring unusable Network Connect ESP configuration; using oNCP/TLS: ", espErr)
 		}
+	}
+	if configuration.esp != nil && client.options.DPDInterval > 0 {
+		configuration.esp.dpd = client.options.DPDInterval
 	}
 	espParameters.clear()
 	return configuration, response, nil
@@ -567,25 +586,25 @@ func parseNCONCPConfigurationPayload(payload []byte) (*ncTunnelConfiguration, nc
 	offset := 0
 	for offset < len(payload) {
 		if len(payload)-offset < 6 {
-			return nil, espParameters, markTerminal(E.New("Network Connect oNCP configuration has a truncated group"))
+			return nil, espParameters, markTerminal(E.New("oNCP configuration has a truncated group"))
 		}
 		group := binary.BigEndian.Uint16(payload[offset : offset+2])
 		groupLengthValue := binary.BigEndian.Uint32(payload[offset+2 : offset+6])
 		offset += 6
 		if uint64(groupLengthValue) > uint64(len(payload)-offset) {
-			return nil, espParameters, markTerminal(E.New("Network Connect oNCP configuration group length is invalid"))
+			return nil, espParameters, markTerminal(E.New("oNCP configuration group length is invalid"))
 		}
 		groupLength := int(groupLengthValue)
 		groupEnd := offset + groupLength
 		for offset < groupEnd {
 			if groupEnd-offset < 6 {
-				return nil, espParameters, markTerminal(E.New("Network Connect oNCP configuration has a truncated attribute"))
+				return nil, espParameters, markTerminal(E.New("oNCP configuration has a truncated attribute"))
 			}
 			attribute := binary.BigEndian.Uint16(payload[offset : offset+2])
 			attributeLengthValue := binary.BigEndian.Uint32(payload[offset+2 : offset+6])
 			offset += 6
 			if uint64(attributeLengthValue) > uint64(groupEnd-offset) {
-				return nil, espParameters, markTerminal(E.New("Network Connect oNCP configuration attribute length is invalid"))
+				return nil, espParameters, markTerminal(E.New("oNCP configuration attribute length is invalid"))
 			}
 			attributeLength := int(attributeLengthValue)
 			content := payload[offset : offset+attributeLength]
@@ -597,7 +616,7 @@ func parseNCONCPConfigurationPayload(payload []byte) (*ncTunnelConfiguration, nc
 		}
 	}
 	if !assignedIPv4.IsValid() || !netmask.IsValid() || configuration.configuration.MTU < 576 || configuration.configuration.MTU > 65535 {
-		return nil, espParameters, markTerminal(E.New("Network Connect oNCP server returned insufficient IPv4 tunnel configuration"))
+		return nil, espParameters, markTerminal(E.New("oNCP server returned insufficient IPv4 tunnel configuration"))
 	}
 	prefix, err := ncIPv4Prefix(assignedIPv4, netmask)
 	if err != nil {
@@ -617,28 +636,28 @@ func parseNCONCPESPParameters(payload []byte, parameters ncESPParameters) (ncESP
 	for offset < len(payload) {
 		if len(payload)-offset < 6 {
 			parameters.clear()
-			return ncESPParameters{}, markTerminal(E.New("Network Connect ESP KMP 302 has a truncated group"))
+			return ncESPParameters{}, markTerminal(E.New("ESP KMP 302 has a truncated group"))
 		}
 		group := binary.BigEndian.Uint16(payload[offset : offset+2])
 		groupLengthValue := binary.BigEndian.Uint32(payload[offset+2 : offset+6])
 		offset += 6
 		if (group != 7 && group != 8) || uint64(groupLengthValue) > uint64(len(payload)-offset) {
 			parameters.clear()
-			return ncESPParameters{}, markTerminal(E.New("Network Connect ESP KMP 302 group is invalid"))
+			return ncESPParameters{}, markTerminal(E.New("ESP KMP 302 group is invalid"))
 		}
 		groupLength := int(groupLengthValue)
 		groupEnd := offset + groupLength
 		for offset < groupEnd {
 			if groupEnd-offset < 6 {
 				parameters.clear()
-				return ncESPParameters{}, markTerminal(E.New("Network Connect ESP KMP 302 has a truncated attribute"))
+				return ncESPParameters{}, markTerminal(E.New("ESP KMP 302 has a truncated attribute"))
 			}
 			attribute := binary.BigEndian.Uint16(payload[offset : offset+2])
 			attributeLengthValue := binary.BigEndian.Uint32(payload[offset+2 : offset+6])
 			offset += 6
 			if uint64(attributeLengthValue) > uint64(groupEnd-offset) {
 				parameters.clear()
-				return ncESPParameters{}, markTerminal(E.New("Network Connect ESP KMP 302 attribute length is invalid"))
+				return ncESPParameters{}, markTerminal(E.New("ESP KMP 302 attribute length is invalid"))
 			}
 			attributeLength := int(attributeLengthValue)
 			content := payload[offset : offset+attributeLength]
@@ -709,23 +728,23 @@ func applyNCONCPConfigurationAttribute(
 		}
 	case 6<<16 | 2:
 		if len(content) != 4 {
-			return E.New("Network Connect oNCP MTU attribute has invalid length")
+			return E.New("oNCP MTU attribute has invalid length")
 		}
 		configuration.configuration.MTU = binary.BigEndian.Uint32(content)
 	case 7<<16 | 1:
 		if len(content) != 4 {
-			return E.New("Network Connect ESP SPI attribute has invalid length")
+			return E.New("ESP SPI attribute has invalid length")
 		}
 		espParameters.serverSPI = binary.BigEndian.Uint32(content)
 	case 7<<16 | 2:
 		if len(content) != 64 {
-			return E.New("Network Connect ESP secret attribute has invalid length")
+			return E.New("ESP secret attribute has invalid length")
 		}
 		clear(espParameters.serverSecret)
 		espParameters.serverSecret = append(espParameters.serverSecret[:0], content...)
 	case 8<<16 | 1:
 		if len(content) != 1 {
-			return E.New("Network Connect ESP encryption attribute has invalid length")
+			return E.New("ESP encryption attribute has invalid length")
 		}
 		switch content[0] {
 		case 2:
@@ -737,7 +756,7 @@ func applyNCONCPConfigurationAttribute(
 		}
 	case 8<<16 | 2:
 		if len(content) != 1 {
-			return E.New("Network Connect ESP authentication attribute has invalid length")
+			return E.New("ESP authentication attribute has invalid length")
 		}
 		switch content[0] {
 		case 1:
@@ -751,22 +770,22 @@ func applyNCONCPConfigurationAttribute(
 		}
 	case 8<<16 | 3:
 		if len(content) != 1 {
-			return E.New("Network Connect ESP compression attribute has invalid length")
+			return E.New("ESP compression attribute has invalid length")
 		}
 		espParameters.compression = content[0]
 	case 8<<16 | 4:
 		if len(content) != 2 {
-			return E.New("Network Connect ESP port attribute has invalid length")
+			return E.New("ESP port attribute has invalid length")
 		}
 		espParameters.port = binary.BigEndian.Uint16(content)
 	case 8<<16 | 9:
 		if len(content) != 4 {
-			return E.New("Network Connect ESP fallback attribute has invalid length")
+			return E.New("ESP fallback attribute has invalid length")
 		}
 		espParameters.dpd = time.Duration(binary.BigEndian.Uint32(content)) * time.Second
 	case 8<<16 | 10:
 		if len(content) != 4 {
-			return E.New("Network Connect ESP replay protection attribute has invalid length")
+			return E.New("ESP replay protection attribute has invalid length")
 		}
 		espParameters.replayProtection = binary.BigEndian.Uint32(content) != 0
 	}
@@ -775,7 +794,7 @@ func applyNCONCPConfigurationAttribute(
 
 func ncIPv4Attribute(content []byte, description string) (netip.Addr, error) {
 	if len(content) != 4 {
-		return netip.Addr{}, E.New("Network Connect oNCP ", description, " attribute has invalid length")
+		return netip.Addr{}, E.New("oNCP ", description, " attribute has invalid length")
 	}
 	address := netip.AddrFrom4([4]byte(content))
 	return address, nil
@@ -783,7 +802,7 @@ func ncIPv4Attribute(content []byte, description string) (netip.Addr, error) {
 
 func ncIPv4Route(content []byte) (netip.Prefix, error) {
 	if len(content) != 8 {
-		return netip.Prefix{}, E.New("Network Connect oNCP IPv4 route has invalid length")
+		return netip.Prefix{}, E.New("oNCP IPv4 route has invalid length")
 	}
 	address := netip.AddrFrom4([4]byte(content[:4]))
 	netmask := netip.AddrFrom4([4]byte(content[4:]))
@@ -792,13 +811,13 @@ func ncIPv4Route(content []byte) (netip.Prefix, error) {
 
 func ncIPv4Prefix(address netip.Addr, netmask netip.Addr) (netip.Prefix, error) {
 	if !address.Is4() || !netmask.Is4() {
-		return netip.Prefix{}, E.New("Network Connect oNCP IPv4 prefix has a non-IPv4 value")
+		return netip.Prefix{}, E.New("oNCP IPv4 prefix has a non-IPv4 value")
 	}
 	maskBytes := netmask.As4()
 	mask := net.IPMask(maskBytes[:])
 	ones, bits := mask.Size()
 	if ones < 0 || bits != 32 {
-		return netip.Prefix{}, E.New("Network Connect oNCP IPv4 netmask is not contiguous")
+		return netip.Prefix{}, E.New("oNCP IPv4 netmask is not contiguous")
 	}
 	return netip.PrefixFrom(address, ones), nil
 }
@@ -854,15 +873,15 @@ func prepareNCONCPESP(
 
 func buildNCONCPESPKeyConfiguration(parameters ncESPParameters) (espKeySetConfig, []byte, error) {
 	if parameters.encryption.keyLength() == 0 || parameters.authentication.keyLength() == 0 || parameters.port == 0 || parameters.serverSPI == 0 || len(parameters.serverSecret) != 64 {
-		return espKeySetConfig{}, nil, E.New("Network Connect ESP parameters are incomplete or use unknown algorithms")
+		return espKeySetConfig{}, nil, E.New("ESP parameters are incomplete or use unknown algorithms")
 	}
 	if parameters.compression > 1 {
-		return espKeySetConfig{}, nil, E.Extend(ErrProtocolNotSupported, "Network Connect ESP compression type is ", parameters.compression)
+		return espKeySetConfig{}, nil, E.Extend(ErrProtocolNotSupported, "ESP compression type is ", parameters.compression)
 	}
 	encryptionKeyLength := parameters.encryption.keyLength()
 	authenticationKeyLength := parameters.authentication.keyLength()
 	if encryptionKeyLength+authenticationKeyLength > len(parameters.serverSecret) {
-		return espKeySetConfig{}, nil, E.New("Network Connect ESP secret block is too short")
+		return espKeySetConfig{}, nil, E.New("ESP secret block is too short")
 	}
 	serverEncryptionKey := append([]byte(nil), parameters.serverSecret[:encryptionKeyLength]...)
 	serverAuthenticationKey := append([]byte(nil), parameters.serverSecret[encryptionKeyLength:encryptionKeyLength+authenticationKeyLength]...)
@@ -941,17 +960,17 @@ func readNCONCPHTTPHeader(reader *bufio.Reader) (int, http.Header, error) {
 	}
 	fields := strings.Fields(statusLine)
 	if len(fields) < 2 || !strings.HasPrefix(fields[0], "HTTP/") {
-		return 0, nil, markTerminal(E.New("Network Connect oNCP HTTP status line is invalid"))
+		return 0, nil, markTerminal(E.New("oNCP HTTP status line is invalid"))
 	}
 	statusCode, err := strconv.Atoi(fields[1])
 	if err != nil || statusCode < 100 || statusCode > 999 {
-		return 0, nil, markTerminal(E.New("Network Connect oNCP HTTP status code is invalid"))
+		return 0, nil, markTerminal(E.New("oNCP HTTP status code is invalid"))
 	}
 	var encodedHeaders strings.Builder
 	for {
 		remaining := ncONCPMaximumHTTPHeaders - encodedHeaders.Len()
 		if remaining <= 0 {
-			return 0, nil, markTerminal(E.New("Network Connect oNCP HTTP headers are too large"))
+			return 0, nil, markTerminal(E.New("oNCP HTTP headers are too large"))
 		}
 		line, lineErr := readNCONCPHTTPLine(reader, remaining)
 		if lineErr != nil {
@@ -976,7 +995,7 @@ func readNCONCPHTTPLine(reader *bufio.Reader, maximum int) (string, error) {
 	for {
 		fragment, err := reader.ReadSlice('\n')
 		if line.Len()+len(fragment) > maximum {
-			return "", markTerminal(E.New("Network Connect oNCP HTTP line is too long"))
+			return "", markTerminal(E.New("oNCP HTTP line is too long"))
 		}
 		line.Write(fragment)
 		if err == bufio.ErrBufferFull {

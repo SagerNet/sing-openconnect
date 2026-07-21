@@ -113,7 +113,7 @@ func (c pulseAuthenticationChallenge) formRequest(generator *softwareTokenGenera
 	case pulseChallengeGTC:
 		return c.gtcForm(generator), nil
 	default:
-		return nil, E.New("Pulse authentication challenge has no user form")
+		return nil, E.New("authentication challenge has no user form")
 	}
 }
 
@@ -312,14 +312,14 @@ func (c pulseAuthenticationChallenge) buildResponse(response authenticationRespo
 	case pulseChallengeGTC:
 		return c.buildGTCResponse(response)
 	default:
-		return nil, "", E.New("Pulse authentication challenge does not accept a form response")
+		return nil, "", E.New("authentication challenge does not accept a form response")
 	}
 }
 
 func pulseStringResponse(response authenticationResponse, submissionKey string, code uint32) ([]byte, string, error) {
 	value, loaded := response.Values[submissionKey]
 	if !loaded || value == "" {
-		return nil, "", E.New("Pulse authentication response omitted ", submissionKey)
+		return nil, "", E.New("authentication response omitted ", submissionKey)
 	}
 	content, err := appendPulseAVP(nil, code, pulseVendorJuniper2, []byte(value))
 	return content, "", err
@@ -330,7 +330,7 @@ func (c pulseAuthenticationChallenge) buildPasswordResponse(response authenticat
 	if c.promptFlags&pulsePromptUsername != 0 {
 		username, loaded := response.Values[pulseUsernameSubmissionKey]
 		if !loaded {
-			return nil, "", E.New("Pulse credential response omitted username")
+			return nil, "", E.New("credential response omitted username")
 		}
 		var err error
 		content, err = appendPulseAVP(content, 0xd6d, pulseVendorJuniper2, []byte(username))
@@ -343,7 +343,7 @@ func (c pulseAuthenticationChallenge) buildPasswordResponse(response authenticat
 		var loaded bool
 		password, loaded = response.Values[pulsePasswordSubmissionKey]
 		if !loaded {
-			return nil, "", E.New("Pulse credential response omitted password")
+			return nil, "", E.New("credential response omitted password")
 		}
 	}
 	var innerPacket []byte
@@ -389,7 +389,7 @@ func (c pulseAuthenticationChallenge) buildPasswordChangeResponse(response authe
 	newPassword, newLoaded := response.Values[pulseNewPasswordSubmissionKey]
 	verifyPassword, verifyLoaded := response.Values[pulseVerifyPasswordSubmissionKey]
 	if !oldLoaded || !newLoaded || !verifyLoaded {
-		return nil, "", E.New("Pulse password-change response omitted a password field")
+		return nil, "", E.New("password-change response omitted a password field")
 	}
 	if newPassword != verifyPassword {
 		return nil, "New passwords do not match.", nil
@@ -424,7 +424,7 @@ func (c pulseAuthenticationChallenge) buildGTCResponse(response authenticationRe
 	if c.promptFlags&pulsePromptUsername != 0 {
 		username, loaded := response.Values[pulseUsernameSubmissionKey]
 		if !loaded {
-			return nil, "", E.New("Pulse GTC response omitted username")
+			return nil, "", E.New("GTC response omitted username")
 		}
 		var err error
 		content, err = appendPulseAVP(content, 0xd6d, pulseVendorJuniper2, []byte(username))
@@ -435,7 +435,7 @@ func (c pulseAuthenticationChallenge) buildGTCResponse(response authenticationRe
 	token, loaded := response.Values[pulseTokenSubmissionKey]
 	if !loaded {
 		clear(content)
-		return nil, "", E.New("Pulse GTC response omitted token code")
+		return nil, "", E.New("GTC response omitted token code")
 	}
 	tokenBytes := []byte(token)
 	defer clear(tokenBytes)
@@ -474,17 +474,17 @@ func parsePulseSessionChoice(content []byte) (pulseSessionChoice, error) {
 			choice.source = string(attribute.data)
 		case 0xd68:
 			if len(attribute.data) != 8 {
-				return pulseSessionChoice{}, E.New("Pulse session timestamp has invalid length")
+				return pulseSessionChoice{}, E.New("session timestamp has invalid length")
 			}
 			seconds := binary.BigEndian.Uint64(attribute.data)
 			if seconds > uint64(^uint64(0)>>1) {
-				return pulseSessionChoice{}, E.New("Pulse session timestamp exceeds the supported range")
+				return pulseSessionChoice{}, E.New("session timestamp exceeds the supported range")
 			}
 			choice.createdAt = time.Unix(int64(seconds), 0)
 		}
 	}
 	if choice.identifier == "" || choice.source == "" || choice.createdAt.IsZero() {
-		return pulseSessionChoice{}, E.New("Pulse session choice omitted required fields")
+		return pulseSessionChoice{}, E.New("session choice omitted required fields")
 	}
 	return choice, nil
 }

@@ -8,6 +8,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/netip"
 	"net/url"
 	"slices"
@@ -65,9 +66,6 @@ type gpRawESPConfiguration struct {
 }
 
 func (f *gpFrontend) fetchTunnelConfiguration(ctx context.Context, snapshot gpSessionSnapshot) (*gpTunnelConfiguration, error) {
-	if !snapshot.authenticatedAddress.IsValid() {
-		return nil, markTerminal(E.New("GlobalProtect configuration requires the authenticated gateway address"))
-	}
 	requestBody := buildGPConfigurationRequest(f.client, snapshot)
 	requestURL := cloneGPURL(snapshot.serverURL)
 	requestURL.Path = gpConfigurationPath
@@ -85,18 +83,22 @@ func (f *gpFrontend) fetchTunnelConfiguration(ctx context.Context, snapshot gpSe
 			return nil, markTerminal(E.Cause(splitErr, "parse GlobalProtect configuration destination"))
 		}
 		if !strings.EqualFold(destinationHostname, gatewayHostname) || destinationPort != gatewayPort {
-			return nil, markTerminal(E.New("GlobalProtect configuration attempted to dial outside the authenticated gateway endpoint"))
+			return nil, markTerminal(E.New("configuration attempted to dial outside the authenticated gateway endpoint"))
 		}
 		parsedPort, parseErr := strconv.ParseUint(destinationPort, 10, 16)
 		if parseErr != nil || parsedPort == 0 {
-			return nil, markTerminal(E.New("GlobalProtect configuration attempted to dial an invalid gateway port"))
+			return nil, markTerminal(E.New("configuration attempted to dial an invalid gateway port"))
+		}
+		destinationHost := gatewayHostname
+		if snapshot.authenticatedAddress.IsValid() {
+			destinationHost = snapshot.authenticatedAddress.String()
 		}
 		dialer := f.client.options.Dialer
-		destination := M.ParseSocksaddrHostPort(snapshot.authenticatedAddress.String(), uint16(parsedPort))
+		destination := M.ParseSocksaddrHostPort(destinationHost, uint16(parsedPort))
 		return dialer.DialContext(dialContext, network, destination)
 	}
 	configurationClient := &http.Client{
-		Transport: transport,
+		Transport: f.client.wrapHTTPTransport(transport),
 		Jar:       f.client.httpClient.Jar,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -106,6 +108,12 @@ func (f *gpFrontend) fetchTunnelConfiguration(ctx context.Context, snapshot gpSe
 	if err != nil {
 		return nil, markTerminal(E.Cause(err, "create GlobalProtect configuration request"))
 	}
+	peer := &pinnedHTTPPeer{address: snapshot.authenticatedAddress}
+	request = request.WithContext(httptrace.WithClientTrace(request.Context(), &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			peer.record(info.Conn)
+		},
+	}))
 	request.Header.Set("Accept", "*/*")
 	request.Header.Set("Accept-Encoding", "identity")
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -138,16 +146,20 @@ func (f *gpFrontend) fetchTunnelConfiguration(ctx context.Context, snapshot gpSe
 		return nil, E.Cause(closeErr, "close GlobalProtect configuration response")
 	}
 	if len(responseBody) > gpMaximumConfigurationBody {
-		return nil, markTerminal(E.New("GlobalProtect configuration response exceeds ", gpMaximumConfigurationBody, " bytes"))
+		return nil, markTerminal(E.New("configuration response exceeds ", gpMaximumConfigurationBody, " bytes"))
 	}
 	statusErr := classifyGPTunnelHTTPStatus(response.StatusCode, "configuration")
 	if statusErr != nil {
 		return nil, statusErr
 	}
 	if string(responseBody) == "errors getting SSL/VPN config" {
-		return nil, E.Errors(ErrSessionRejected, E.New("GlobalProtect gateway rejected the configuration cookie"))
+		return nil, E.Errors(ErrSessionRejected, E.New("gateway rejected the configuration cookie"))
 	}
-	configuration, err := parseGPTunnelConfiguration(ctx, f.client, responseBody, snapshot.authenticatedAddress)
+	authenticatedAddress := peer.address
+	if !authenticatedAddress.IsValid() {
+		return nil, markTerminal(E.New("configuration endpoint did not expose an authenticated IP address"))
+	}
+	configuration, err := parseGPTunnelConfiguration(ctx, f.client, responseBody, authenticatedAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -159,16 +171,20 @@ func buildGPConfigurationRequest(client *Client, snapshot gpSessionSnapshot) str
 	var body strings.Builder
 	body.WriteString("client-type=1&protocol-version=p1&internal=no")
 	appendGPEncodedOption(&body, "app-version", snapshot.clientVersion)
-	appendGPEncodedOption(&body, "ipv6-support", "yes")
+	ipv6Support := "yes"
+	if client.options.IPv6Disabled {
+		ipv6Support = "no"
+	}
+	appendGPEncodedOption(&body, "ipv6-support", ipv6Support)
 	appendGPEncodedOption(&body, "clientos", reportedGPOS(client))
 	appendGPEncodedOption(&body, "os-version", client.options.ReportedOS)
 	appendGPEncodedOption(&body, "hmac-algo", "sha1,md5,sha256")
 	appendGPEncodedOption(&body, "enc-algo", "aes-128-cbc,aes-256-cbc")
-	if snapshot.previousIPv4.IsValid() || snapshot.previousIPv6.IsValid() {
+	if snapshot.previousIPv4.IsValid() || !client.options.IPv6Disabled && snapshot.previousIPv6.IsValid() {
 		if snapshot.previousIPv4.IsValid() {
 			appendGPEncodedOption(&body, "preferred-ip", snapshot.previousIPv4.String())
 		}
-		if snapshot.previousIPv6.IsValid() {
+		if !client.options.IPv6Disabled && snapshot.previousIPv6.IsValid() {
 			appendGPEncodedOption(&body, "preferred-ipv6", snapshot.previousIPv6.String())
 		}
 		filtered := filterGPOpaqueQuery(snapshot.opaqueQuery, map[string]struct{}{
@@ -180,8 +196,14 @@ func buildGPConfigurationRequest(client *Client, snapshot gpSessionSnapshot) str
 			body.WriteString(filtered)
 		}
 	} else if snapshot.opaqueQuery != "" {
-		body.WriteByte('&')
-		body.WriteString(snapshot.opaqueQuery)
+		filtered := snapshot.opaqueQuery
+		if client.options.IPv6Disabled {
+			filtered = filterGPOpaqueQuery(filtered, map[string]struct{}{"preferred-ipv6": {}}, false)
+		}
+		if filtered != "" {
+			body.WriteByte('&')
+			body.WriteString(filtered)
+		}
 	}
 	return body.String()
 }
@@ -216,12 +238,12 @@ func classifyGPTunnelHTTPStatus(statusCode int, operation string) error {
 	}
 	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden || statusCode == 512 ||
 		(operation == "GPST" && statusCode == http.StatusBadGateway) {
-		return E.Errors(ErrSessionRejected, E.New("GlobalProtect ", operation, " returned HTTP ", statusCode))
+		return E.Errors(ErrSessionRejected, E.New(operation, " returned HTTP ", statusCode))
 	}
 	if operation == "GPST" && statusCode == http.StatusMethodNotAllowed {
-		return markTerminal(E.Extend(ErrProtocolNotSupported, "GlobalProtect GPST endpoint returned HTTP 405"))
+		return markTerminal(E.Extend(ErrProtocolNotSupported, "GPST endpoint returned HTTP 405"))
 	}
-	statusErr := E.New("GlobalProtect ", operation, " returned HTTP ", statusCode)
+	statusErr := E.New(operation, " returned HTTP ", statusCode)
 	if statusCode == 513 {
 		return E.Errors(ErrAuthenticationFailed, statusErr)
 	}
@@ -259,6 +281,10 @@ func parseGPTunnelConfiguration(
 		TunnelPath: gpDefaultTunnelPath,
 		DPD:        gpDefaultDPDInterval,
 		Keepalive:  gpDefaultDPDInterval,
+	}
+	if client.options.DPDInterval > 0 {
+		result.DPD = client.options.DPDInterval
+		result.Keepalive = client.options.DPDInterval
 	}
 	var assignedIPv4Text string
 	var assignedIPv6Text string
@@ -341,7 +367,7 @@ func parseGPTunnelConfiguration(
 			}
 		case "quarantine":
 			if value != "" && value != "no" && client.options.Logger != nil {
-				client.options.Logger.WarnContext(ctx, "GlobalProtect tunnel configuration reports quarantine status: ", value)
+				client.options.Logger.WarnContext(ctx, "tunnel configuration reports quarantine status: ", value)
 			}
 		case "connected-gw-ip", "need-tunnel", "bw-c2s", "bw-s2c", "default-gateway", "default-gateway-v6",
 			"no-direct-access-to-local-network", "ip-address-preferred", "ip-address-v6-preferred", "ipv6-connection", "portal", "user", "error":
@@ -372,14 +398,20 @@ func parseGPTunnelConfiguration(
 		}
 		return nil, markTerminal(err)
 	}
+	if client.options.IPv6Disabled {
+		assignedIPv6 = netip.Addr{}
+		ipv6Prefix = netip.Prefix{}
+		magicIPv6 = netip.Addr{}
+	}
 	if !assignedIPv4.IsValid() && !assignedIPv6.IsValid() {
 		if rawESP != nil {
 			rawESP.clear()
 		}
-		return nil, markTerminal(E.New("GlobalProtect tunnel configuration has no assigned IP address"))
+		return nil, markTerminal(E.New("tunnel configuration has no assigned IP address"))
 	}
 	result.AssignedIPv4 = assignedIPv4
 	result.AssignedIPv6 = assignedIPv6
+	result.Configuration.RemoteAddress = authenticatedAddress.Unmap()
 	if ipv4Prefix.IsValid() {
 		result.Configuration.Addresses = append(result.Configuration.Addresses, ipv4Prefix)
 	}
@@ -396,7 +428,7 @@ func parseGPTunnelConfiguration(
 		rawESP.clear()
 	}
 	if configuredMTU == 0 {
-		result.Configuration.MTU = uint32(calculateGPTunnelMTU(authenticatedAddress.Is6(), result.ESP))
+		result.Configuration.MTU = uint32(calculateGPTunnelMTU(client.options.MTU, client.options.BaseMTU, authenticatedAddress.Is6(), result.ESP))
 	} else {
 		minimumMTU := uint64(576)
 		if assignedIPv6.IsValid() {
@@ -410,6 +442,7 @@ func parseGPTunnelConfiguration(
 		}
 		result.Configuration.MTU = uint32(configuredMTU)
 	}
+	result.Configuration = normalizeTunnelConfiguration(result.Configuration, client.options.IPv6Disabled)
 	return result, nil
 }
 
@@ -438,7 +471,7 @@ func parseGPAssignedAddress(addressText string, netmaskText string, ipv6 bool) (
 		address = parsedAddress.Unmap()
 	}
 	if ipv6 != address.Is6() {
-		return netip.Addr{}, netip.Prefix{}, E.New("GlobalProtect assigned address has the wrong address family: ", address)
+		return netip.Addr{}, netip.Prefix{}, E.New("assigned address has the wrong address family: ", address)
 	}
 	if !ipv6 && strings.TrimSpace(netmaskText) != "" {
 		parsedBits, err := parseGPIPv4Netmask(netmaskText)
@@ -531,7 +564,7 @@ func appendGPRoutes(destination *[]TunnelRoute, node gpConfigurationXMLNode, ipv
 		}
 		prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()).Masked()
 		if prefix.Addr().Is6() != ipv6 {
-			return E.New("GlobalProtect tunnel route has the wrong address family: ", value)
+			return E.New("tunnel route has the wrong address family: ", value)
 		}
 		*destination = append(*destination, TunnelRoute{Prefix: prefix})
 	}
@@ -547,7 +580,7 @@ func parseGPRawESP(node gpConfigurationXMLNode) (*gpRawESPConfiguration, error) 
 		case "udp-port":
 			parsedPort, parseErr := parseGPUnsigned(value, "ESP UDP port", 16)
 			if parseErr == nil && parsedPort == 0 {
-				parseErr = E.New("GlobalProtect ESP UDP port is zero")
+				parseErr = E.New("ESP UDP port is zero")
 			}
 			raw.port = uint16(parsedPort)
 			err = parseErr
@@ -619,7 +652,7 @@ func parseGPESPKey(node gpConfigurationXMLNode, description string) ([]byte, err
 	}
 	if bits == 0 || bits%8 != 0 || uint64(len(key)) != bits/8 {
 		clear(key)
-		return nil, E.New("GlobalProtect ESP ", description, " key length does not match its bit count")
+		return nil, E.New("ESP ", description, " key length does not match its bit count")
 	}
 	return key, nil
 }
@@ -653,7 +686,7 @@ func buildGPESPConfiguration(
 ) *gpESPConfiguration {
 	fallback := func(reason any) *gpESPConfiguration {
 		if client.options.Logger != nil {
-			client.options.Logger.WarnContext(ctx, "GlobalProtect ESP configuration is unavailable; using GPST: ", reason)
+			client.options.Logger.WarnContext(ctx, "ESP configuration is unavailable; using GPST: ", reason)
 		}
 		return nil
 	}
@@ -717,7 +750,7 @@ func parseGPAddress(value string, ipv6 bool, description string) (netip.Addr, er
 	}
 	address = address.Unmap()
 	if address.Is6() != ipv6 {
-		return netip.Addr{}, E.New("GlobalProtect ", description, " has the wrong address family")
+		return netip.Addr{}, E.New(description, " has the wrong address family")
 	}
 	return address, nil
 }
@@ -736,7 +769,7 @@ func parseGPSeconds(value string, description string) (time.Duration, error) {
 		return 0, err
 	}
 	if seconds > uint64(math.MaxInt64/int64(time.Second)) {
-		return 0, E.New("GlobalProtect ", description, " exceeds the supported duration")
+		return 0, E.New(description, " exceeds the supported duration")
 	}
 	return time.Duration(seconds) * time.Second, nil
 }
@@ -756,18 +789,32 @@ func parseGPAdjustedInterval(value string, description string) (time.Duration, e
 	return interval, nil
 }
 
-func calculateGPTunnelMTU(outerIPv6 bool, configuration *gpESPConfiguration) int {
-	outerHeader := 20
-	if outerIPv6 {
-		outerHeader = 40
+func calculateGPTunnelMTU(requestedMTU uint32, baseMTU uint32, outerIPv6 bool, configuration *gpESPConfiguration) int {
+	if baseMTU == 0 {
+		baseMTU = gpDefaultBaseMTU
+	}
+	if baseMTU < 1280 {
+		baseMTU = 1280
+	}
+	mtu := int(requestedMTU)
+	if mtu == 0 {
+		outerHeader := 20
+		if outerIPv6 {
+			outerHeader = 40
+		}
+		mtu = int(baseMTU) - outerHeader
+		if configuration == nil {
+			mtu -= 20
+		} else {
+			mtu -= 8
+		}
 	}
 	if configuration == nil {
-		return gpDefaultBaseMTU - outerHeader - 20 - 5
+		return mtu - 5
 	}
 	configuration.Keys.outboundAccess.Lock()
 	icvLength := configuration.Keys.outbound.authentication.icvLength()
 	configuration.Keys.outboundAccess.Unlock()
-	mtu := gpDefaultBaseMTU - outerHeader - 8
 	mtu -= 8 + icvLength + 16
 	mtu -= mtu % 16
 	mtu -= 2

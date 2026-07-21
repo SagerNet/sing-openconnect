@@ -12,6 +12,7 @@
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
+#include <openssl/provider.h>
 #include <openssl/rand.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -31,9 +32,9 @@
 #define DTLS09_SESSION_ID 32
 #define DTLS09_RANDOM 32
 #define DTLS09_MAC 20
-#define DTLS09_BLOCK 16
+#define DTLS09_MAX_BLOCK 16
 #define DTLS09_FINISHED 12
-#define DTLS09_KEY_BLOCK 104
+#define DTLS09_MAX_KEY_BLOCK 104
 
 #define CONTENT_CHANGE_CIPHER_SPEC 20
 #define CONTENT_HANDSHAKE 22
@@ -48,6 +49,12 @@ static const uint8_t hello_verify_cookie[20] = {
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
     0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13,
 };
+
+static const EVP_CIPHER *record_cipher;
+static size_t record_block_length;
+static size_t record_key_length;
+static size_t record_key_block_length;
+static uint16_t record_cipher_suite;
 
 struct dtls09_record {
     uint8_t type;
@@ -290,12 +297,12 @@ static int record_mac(const uint8_t key[DTLS09_MAC], uint8_t type, uint16_t epoc
 }
 
 static int encrypt_record(uint8_t type, uint64_t sequence, const uint8_t *content,
-                          size_t content_length, const uint8_t key[16],
+                          size_t content_length, const uint8_t *key,
                           const uint8_t mac_key[20], uint8_t *output,
                           size_t output_capacity, size_t *output_length)
 {
     uint8_t mac[DTLS09_MAC];
-    uint8_t iv[DTLS09_BLOCK];
+    uint8_t iv[DTLS09_MAX_BLOCK];
     uint8_t *plaintext;
     uint8_t *ciphertext;
     EVP_CIPHER_CTX *cipher_context;
@@ -307,9 +314,9 @@ static int encrypt_record(uint8_t type, uint64_t sequence, const uint8_t *conten
 
     if (!record_mac(mac_key, type, 1, sequence, content, content_length, mac))
         return 0;
-    padding = DTLS09_BLOCK - 1 - ((content_length + DTLS09_MAC) % DTLS09_BLOCK);
+    padding = record_block_length - 1 - ((content_length + DTLS09_MAC) % record_block_length);
     plaintext_length = content_length + DTLS09_MAC + padding + 1;
-    if (output_capacity < DTLS09_RECORD_HEADER + DTLS09_BLOCK + plaintext_length)
+    if (output_capacity < DTLS09_RECORD_HEADER + record_block_length + plaintext_length)
         return 0;
     plaintext = malloc(plaintext_length);
     ciphertext = malloc(plaintext_length);
@@ -319,8 +326,8 @@ static int encrypt_record(uint8_t type, uint64_t sequence, const uint8_t *conten
     memcpy(plaintext, content, content_length);
     memcpy(plaintext + content_length, mac, DTLS09_MAC);
     memset(plaintext + content_length + DTLS09_MAC, (int)padding, padding + 1);
-    if (RAND_bytes(iv, sizeof(iv)) != 1 ||
-        EVP_EncryptInit_ex(cipher_context, EVP_aes_128_cbc(), NULL, key, iv) != 1 ||
+    if (RAND_bytes(iv, (int)record_block_length) != 1 ||
+        EVP_EncryptInit_ex(cipher_context, record_cipher, NULL, key, iv) != 1 ||
         EVP_CIPHER_CTX_set_padding(cipher_context, 0) != 1 ||
         EVP_EncryptUpdate(cipher_context, ciphertext, &encrypted_length,
                           plaintext, (int)plaintext_length) != 1 ||
@@ -328,10 +335,10 @@ static int encrypt_record(uint8_t type, uint64_t sequence, const uint8_t *conten
                             &final_length) != 1 ||
         (size_t)(encrypted_length + final_length) != plaintext_length)
         goto done;
-    write_record_header(output, type, 1, sequence, DTLS09_BLOCK + plaintext_length);
-    memcpy(output + DTLS09_RECORD_HEADER, iv, DTLS09_BLOCK);
-    memcpy(output + DTLS09_RECORD_HEADER + DTLS09_BLOCK, ciphertext, plaintext_length);
-    *output_length = DTLS09_RECORD_HEADER + DTLS09_BLOCK + plaintext_length;
+    write_record_header(output, type, 1, sequence, record_block_length + plaintext_length);
+    memcpy(output + DTLS09_RECORD_HEADER, iv, record_block_length);
+    memcpy(output + DTLS09_RECORD_HEADER + record_block_length, ciphertext, plaintext_length);
+    *output_length = DTLS09_RECORD_HEADER + record_block_length + plaintext_length;
     result = 1;
 
 done:
@@ -341,7 +348,7 @@ done:
     return result;
 }
 
-static int decrypt_record(const struct dtls09_record *record, const uint8_t key[16],
+static int decrypt_record(const struct dtls09_record *record, const uint8_t *key,
                           const uint8_t mac_key[20], uint8_t *output,
                           size_t output_capacity, size_t *output_length)
 {
@@ -359,17 +366,17 @@ static int decrypt_record(const struct dtls09_record *record, const uint8_t key[
     size_t i;
     int result = 0;
 
-    if (record->epoch != 1 || record->payload_length <= DTLS09_BLOCK ||
-        (record->payload_length - DTLS09_BLOCK) % DTLS09_BLOCK != 0)
+    if (record->epoch != 1 || record->payload_length <= record_block_length ||
+        (record->payload_length - record_block_length) % record_block_length != 0)
         return 0;
     iv = record->payload;
-    ciphertext = record->payload + DTLS09_BLOCK;
-    ciphertext_length = record->payload_length - DTLS09_BLOCK;
+    ciphertext = record->payload + record_block_length;
+    ciphertext_length = record->payload_length - record_block_length;
     plaintext = malloc(ciphertext_length);
     cipher_context = EVP_CIPHER_CTX_new();
     if (plaintext == NULL || cipher_context == NULL)
         goto done;
-    if (EVP_DecryptInit_ex(cipher_context, EVP_aes_128_cbc(), NULL, key, iv) != 1 ||
+    if (EVP_DecryptInit_ex(cipher_context, record_cipher, NULL, key, iv) != 1 ||
         EVP_CIPHER_CTX_set_padding(cipher_context, 0) != 1 ||
         EVP_DecryptUpdate(cipher_context, plaintext, &decrypted_length,
                           ciphertext, (int)ciphertext_length) != 1 ||
@@ -458,7 +465,7 @@ static int validate_client_hello(const uint8_t *datagram, size_t datagram_length
     cipher_length = read_u16(body + position);
     position += 2;
     if (cipher_length != 2 || position + cipher_length > handshake_body_length ||
-        read_u16(body + position) != 0x002f)
+        read_u16(body + position) != record_cipher_suite)
         return 0;
     position += cipher_length;
     if (position >= handshake_body_length)
@@ -512,7 +519,7 @@ static size_t build_server_hello(uint8_t *output, const uint8_t server_random[32
     body[position++] = DTLS09_SESSION_ID;
     memcpy(body + position, session_id, DTLS09_SESSION_ID);
     position += DTLS09_SESSION_ID;
-    write_u16(body + position, 0x002f);
+    write_u16(body + position, record_cipher_suite);
     position += 2;
     body[position++] = 0;
     memcpy(body_copy, body, position);
@@ -574,7 +581,7 @@ int main(int argc, char **argv)
     uint8_t client_hello_body[512];
     uint8_t server_hello_body[512];
     uint8_t key_seed[DTLS09_RANDOM * 2];
-    uint8_t key_block[DTLS09_KEY_BLOCK];
+    uint8_t key_block[DTLS09_MAX_KEY_BLOCK];
     const uint8_t *client_mac_key;
     const uint8_t *server_mac_key;
     const uint8_t *client_key;
@@ -603,13 +610,42 @@ int main(int argc, char **argv)
     int socket_fd = -1;
     char cookie_hex[sizeof(hello_verify_cookie) * 2 + 1];
     char client_ip[INET_ADDRSTRLEN];
+    OSSL_PROVIDER *default_provider = NULL;
+    OSSL_PROVIDER *legacy_provider = NULL;
     int result = 1;
 
     setvbuf(stdout, NULL, _IOLBF, 0);
-    if (argc != 3 || !decode_hex(argv[1], session_id, sizeof(session_id)) ||
+    if (argc != 4 || !decode_hex(argv[1], session_id, sizeof(session_id)) ||
         !decode_hex(argv[2], master_secret, sizeof(master_secret))) {
-        fprintf(stderr, "DTLS09_ERROR usage: dtls09-peer SESSION_ID_HEX MASTER_SECRET_HEX\n");
+        fprintf(stderr, "DTLS09_ERROR usage: dtls09-peer SESSION_ID_HEX MASTER_SECRET_HEX CIPHER\n");
         return 2;
+    }
+    default_provider = OSSL_PROVIDER_load(NULL, "default");
+    legacy_provider = OSSL_PROVIDER_load(NULL, "legacy");
+    if (default_provider == NULL || legacy_provider == NULL) {
+        fprintf(stderr, "DTLS09_ERROR OpenSSL providers unavailable\n");
+        goto done;
+    }
+    if (strcmp(argv[3], "AES128-SHA") == 0) {
+        record_cipher = EVP_aes_128_cbc();
+        record_block_length = 16;
+        record_key_length = 16;
+        record_cipher_suite = 0x002f;
+    } else if (strcmp(argv[3], "DES-CBC-SHA") == 0) {
+        record_cipher = EVP_des_cbc();
+        record_block_length = 8;
+        record_key_length = 8;
+        record_cipher_suite = 0x0009;
+    } else {
+        fprintf(stderr, "DTLS09_ERROR unsupported cipher: %s\n", argv[3]);
+        goto done;
+    }
+    record_key_block_length = 2 * DTLS09_MAC + 2 * record_key_length + 2 * record_block_length;
+    if (record_cipher == NULL || EVP_CIPHER_get_block_size(record_cipher) != (int)record_block_length ||
+        EVP_CIPHER_get_key_length(record_cipher) != (int)record_key_length ||
+        record_key_block_length > sizeof(key_block)) {
+        fprintf(stderr, "DTLS09_ERROR invalid cipher parameters: %s\n", argv[3]);
+        goto done;
     }
     socket_fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (socket_fd < 0) {
@@ -631,7 +667,7 @@ int main(int argc, char **argv)
         goto done;
     }
     encode_hex(hello_verify_cookie, sizeof(hello_verify_cookie), cookie_hex);
-    printf("DTLS09_READY port=%d cookie=%s\n", DTLS09_PORT, cookie_hex);
+    printf("DTLS09_READY port=%d cookie=%s cipher=%s\n", DTLS09_PORT, cookie_hex, argv[3]);
 
     received = receive_datagram(socket_fd, datagram, sizeof(datagram), &client_address);
     if (received <= 0 || !validate_client_hello(datagram, (size_t)received, 0,
@@ -660,14 +696,14 @@ int main(int argc, char **argv)
     memcpy(key_seed, server_random, DTLS09_RANDOM);
     memcpy(key_seed + DTLS09_RANDOM, client_random, DTLS09_RANDOM);
     if (!tls10_prf(master_secret, sizeof(master_secret), "key expansion", key_seed,
-                   sizeof(key_seed), key_block, sizeof(key_block))) {
+                   sizeof(key_seed), key_block, record_key_block_length)) {
         fprintf(stderr, "DTLS09_ERROR key expansion failed\n");
         goto done;
     }
     client_mac_key = key_block;
     server_mac_key = key_block + 20;
     client_key = key_block + 40;
-    server_key = key_block + 56;
+    server_key = client_key + record_key_length;
 
     offset = build_server_hello(response, server_random, session_id,
                                 server_hello_body, &server_hello_body_length);
@@ -782,5 +818,9 @@ int main(int argc, char **argv)
 done:
     if (socket_fd >= 0)
         close(socket_fd);
+    if (legacy_provider != NULL)
+        OSSL_PROVIDER_unload(legacy_provider);
+    if (default_provider != NULL)
+        OSSL_PROVIDER_unload(default_provider);
     return result;
 }

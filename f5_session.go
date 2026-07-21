@@ -9,11 +9,11 @@ import (
 	"net/http"
 	"net/netip"
 	"net/textproto"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/sagernet/sing/common/buf"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -44,14 +44,7 @@ func init() {
 }
 
 func newF5Frontend(client *Client) (*f5Frontend, error) {
-	localHostname, hostnameErr := os.Hostname()
-	if hostnameErr != nil {
-		return nil, E.Cause(hostnameErr, "read local hostname for F5 identity")
-	}
-	if localHostname == "" {
-		return nil, E.New("local hostname for F5 identity is empty")
-	}
-	return &f5Frontend{client: client, localHostname: localHostname}, nil
+	return &f5Frontend{client: client, localHostname: client.options.LocalHostname}, nil
 }
 
 func (f *f5Frontend) ConnectTunnel(ctx context.Context, obtained obtainedSession) (clientSession, error) {
@@ -60,7 +53,7 @@ func (f *f5Frontend) ConnectTunnel(ctx context.Context, obtained obtainedSession
 		return nil, E.Extend(ErrProtocolNotSupported, "invalid F5 obtained session")
 	}
 	snapshot := state.snapshot()
-	if state.frontend != f || snapshot.serverURL == nil || !snapshot.acceptedAddress.IsValid() || snapshot.jar == nil || snapshot.mrhSession == "" || snapshot.f5ST == "" {
+	if state.frontend != f || snapshot.serverURL == nil || snapshot.jar == nil || snapshot.mrhSession == "" {
 		return nil, ErrSessionRejected
 	}
 	if !snapshot.authenticationExpiration.IsZero() && !time.Now().Before(snapshot.authenticationExpiration) {
@@ -89,6 +82,7 @@ func (s *f5Session) preparePPP() (pppSessionSetup, error) {
 	if configurationErr != nil {
 		return pppSessionSetup{}, configurationErr
 	}
+	s.snapshot = s.state.snapshot()
 	s.configuration = configuration
 	dtlsEnabled := configuration.dtlsEnabled && !configuration.hdlc && !s.client.options.NoUDP
 	carrier, usingDTLS, carrierErr := s.connectInitialPPPCarrier(dtlsEnabled, s.snapshot.skipInitialDTLS)
@@ -101,11 +95,15 @@ func (s *f5Session) preparePPP() (pppSessionSetup, error) {
 	}
 	proposedIPv4 := carrier.proposedIPv4
 	proposedIPv6 := carrier.proposedIPv6
+	if s.client.options.IPv6Disabled {
+		proposedIPv6 = netip.Prefix{}
+	}
 	if s.snapshot.hasPreviousAddresses {
 		proposedIPv4 = s.snapshot.previousIPv4
 		proposedIPv6 = s.snapshot.previousIPv6
 	}
 	requestNameServers := configuration.wantIPv4 && len(configuration.configuration.DNS) == 0 && len(configuration.configuration.NBNS) == 0
+	echoInterval := s.client.options.DPDInterval
 	return pppSessionSetup{
 		linkConfiguration: pppLinkConfig{
 			Carrier: pppCarrierConfig{
@@ -115,13 +113,16 @@ func (s *f5Session) preparePPP() (pppSessionSetup, error) {
 			},
 			Encapsulation:          encapsulation,
 			WantIPv4:               configuration.wantIPv4,
-			WantIPv6:               configuration.wantIPv6,
+			WantIPv6:               configuration.wantIPv6 && !s.client.options.IPv6Disabled,
 			IPv4Address:            proposedIPv4,
 			IPv6Address:            proposedIPv6,
 			LockAddresses:          s.snapshot.hasPreviousAddresses,
 			MTU:                    carrier.mtu,
 			RequestIPv4NameServers: requestNameServers,
-			Deliver:                s.client.pushIncomingDataPacket,
+			EchoInterval:           echoInterval,
+			Deliver: func(packetBuffer *buf.Buffer) {
+				s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
+			},
 		},
 		configuration: configuration.configuration,
 		usingDTLS:     usingDTLS,
@@ -160,7 +161,7 @@ func (s *f5Session) connectPPPTLS() (pppSessionCarrier, error) {
 		return pppSessionCarrier{}, E.Cause(deadlineErr, "set F5 TLS connection deadline")
 	}
 	tlsConfiguration := s.client.tlsConfig.Clone()
-	if s.client.options.TLSConfig.Config == nil || s.client.options.TLSConfig.Config.ServerName == "" {
+	if tlsConfiguration.ServerName == "" {
 		tlsConfiguration.ServerName = s.snapshot.serverURL.Hostname()
 	}
 	tlsConfiguration.NextProtos = []string{"http/1.1"}
@@ -182,7 +183,7 @@ func (s *f5Session) connectPPPTLS() (pppSessionCarrier, error) {
 		return pppSessionCarrier{}, ErrSessionRejected
 	}
 	if statusCode != http.StatusOK && statusCode != http.StatusCreated {
-		return pppSessionCarrier{}, markTerminal(E.New("F5 TLS tunnel returned HTTP ", statusCode))
+		return pppSessionCarrier{}, markTerminal(E.New("TLS tunnel returned HTTP ", statusCode))
 	}
 	proposedIPv4, proposedIPv6, addressErr := parseF5ProposedAddresses(responseHeader)
 	if addressErr != nil {
@@ -204,7 +205,7 @@ func (s *f5Session) connectPPPTLS() (pppSessionCarrier, error) {
 func (s *f5Session) connectPPPDTLS(ctx context.Context) (pppSessionCarrier, error) {
 	configuration := s.configuration
 	tlsConfiguration := s.client.tlsConfig.Clone()
-	if s.client.options.TLSConfig.Config == nil || s.client.options.TLSConfig.Config.ServerName == "" {
+	if tlsConfiguration.ServerName == "" {
 		tlsConfiguration.ServerName = s.snapshot.serverURL.Hostname()
 	}
 	connection, connectErr := connectCertificateDTLS(ctx, certificateDTLSNegotiation{
@@ -226,7 +227,7 @@ func (s *f5Session) connectPPPDTLS(ctx context.Context) (pppSessionCarrier, erro
 		}
 	}()
 	if connection.DataMTU() > 0 && len(configuration.connectRequest) > connection.DataMTU() {
-		return pppSessionCarrier{}, E.New("F5 DTLS connect request exceeds negotiated datagram MTU")
+		return pppSessionCarrier{}, E.New("DTLS connect request exceeds negotiated datagram MTU")
 	}
 	proposedIPv4, proposedIPv6, probeErr := probeF5DTLS(ctx, connection, configuration.connectRequest)
 	if probeErr != nil {
@@ -234,7 +235,7 @@ func (s *f5Session) connectPPPDTLS(ctx context.Context) (pppSessionCarrier, erro
 	}
 	dataMTU := connection.DataMTU() - 8
 	if dataMTU < pppMinimumMRU {
-		return pppSessionCarrier{}, E.New("F5 DTLS data MTU is too small for PPP")
+		return pppSessionCarrier{}, E.New("DTLS data MTU is too small for PPP")
 	}
 	tunnelMTU := min(int(configuration.configuration.MTU), dataMTU)
 	setupComplete = true
@@ -292,7 +293,7 @@ func probeF5DTLS(
 		if statusCode != http.StatusOK {
 			return netip.Prefix{}, netip.Prefix{}, markTerminal(E.Errors(
 				ErrProtocolNotSupported,
-				E.New("F5 DTLS application probe returned HTTP ", statusCode),
+				E.New("DTLS application probe returned HTTP ", statusCode),
 			))
 		}
 		proposedIPv4, proposedIPv6, addressErr := parseF5ProposedAddresses(responseHeader)
@@ -331,7 +332,7 @@ func readF5HTTPHeader(reader *bufio.Reader) (int, http.Header, error) {
 	for {
 		remaining := f5MaximumHeaderSize - encodedHeaders.Len()
 		if remaining <= 0 {
-			return 0, nil, E.New("F5 HTTP headers exceed ", f5MaximumHeaderSize, " bytes")
+			return 0, nil, E.New("HTTP headers exceed ", f5MaximumHeaderSize, " bytes")
 		}
 		line, lineErr := readF5HTTPLine(reader, remaining)
 		if lineErr != nil {
@@ -356,7 +357,7 @@ func readF5HTTPLine(reader *bufio.Reader, maximum int) (string, error) {
 	for {
 		fragment, readErr := reader.ReadSlice('\n')
 		if line.Len()+len(fragment) > maximum {
-			return "", E.New("F5 HTTP line exceeds ", maximum, " bytes")
+			return "", E.New("HTTP line exceeds ", maximum, " bytes")
 		}
 		line.Write(fragment)
 		if readErr == bufio.ErrBufferFull {
@@ -376,7 +377,7 @@ func parseF5ProposedAddresses(header http.Header) (netip.Prefix, netip.Prefix, e
 	if ipv4Text != "" {
 		address, parseErr := netip.ParseAddr(ipv4Text)
 		if parseErr != nil || !address.Is4() {
-			return netip.Prefix{}, netip.Prefix{}, E.New("F5 tunnel returned an invalid IPv4 address: ", ipv4Text)
+			return netip.Prefix{}, netip.Prefix{}, E.New("tunnel returned an invalid IPv4 address: ", ipv4Text)
 		}
 		ipv4Prefix = netip.PrefixFrom(address.Unmap(), 32)
 	}
@@ -384,7 +385,7 @@ func parseF5ProposedAddresses(header http.Header) (netip.Prefix, netip.Prefix, e
 	if ipv6Text != "" {
 		address, parseErr := netip.ParseAddr(ipv6Text)
 		if parseErr != nil || !address.Is6() {
-			return netip.Prefix{}, netip.Prefix{}, E.New("F5 tunnel returned an invalid IPv6 address: ", ipv6Text)
+			return netip.Prefix{}, netip.Prefix{}, E.New("tunnel returned an invalid IPv6 address: ", ipv6Text)
 		}
 		ipv6Prefix = netip.PrefixFrom(address, 64)
 	}

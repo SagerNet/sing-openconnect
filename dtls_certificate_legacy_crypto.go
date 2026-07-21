@@ -122,7 +122,7 @@ func (h *certificateDTLS10Handshake) buildClientKeyExchange() ([]byte, []byte, e
 	leaf := h.flight.peerCertificates[0]
 	rsaPublicKey, isRSA := leaf.PublicKey.(*rsa.PublicKey)
 	if !isRSA {
-		return nil, nil, E.Extend(ErrProtocolNotSupported, "F5 DTLS 1.0 requires an RSA server certificate")
+		return nil, nil, E.Extend(ErrProtocolNotSupported, "DTLS 1.0 requires an RSA server certificate")
 	}
 	if !h.flight.cipherSuite.ecdhe {
 		preMasterSecret := make([]byte, 48)
@@ -162,7 +162,7 @@ func (h *certificateDTLS10Handshake) buildClientKeyExchange() ([]byte, []byte, e
 	case 25:
 		curve = ecdh.P521()
 	default:
-		return nil, nil, E.Extend(ErrProtocolNotSupported, "F5 DTLS 1.0 ECDHE named curve ", curveID)
+		return nil, nil, E.Extend(ErrProtocolNotSupported, "DTLS 1.0 ECDHE named curve ", curveID)
 	}
 	publicKeyLength := int(body[3])
 	if publicKeyLength == 0 || len(body) < 4+publicKeyLength+2 {
@@ -259,7 +259,7 @@ func certificateDTLSCertificateMatchesCA(certificate *tls.Certificate, acceptabl
 func signCertificateDTLS10Transcript(certificate *tls.Certificate, transcript []byte) ([]byte, error) {
 	signer, isRSA := certificateDTLSRSASigner(certificate)
 	if !isRSA {
-		return nil, E.Extend(ErrProtocolNotSupported, "F5 DTLS 1.0 client certificate requires an RSA key")
+		return nil, E.Extend(ErrProtocolNotSupported, "DTLS 1.0 client certificate requires an RSA key")
 	}
 	md5Digest := md5.Sum(transcript)
 	sha1Digest := sha1.Sum(transcript)

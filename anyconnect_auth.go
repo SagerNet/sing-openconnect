@@ -24,7 +24,7 @@ import (
 
 const anyConnectMaximumRedirects = 10
 
-var errAnyConnectXMLPostFallback = E.New("AnyConnect XMLPOST probe requires legacy authentication fallback")
+var errAnyConnectXMLPostFallback = E.New("XMLPOST probe requires legacy authentication fallback")
 
 type anyConnectAuthenticationStage uint8
 
@@ -83,7 +83,7 @@ func init() {
 
 func newAnyConnectFrontend(client *Client) (*anyConnectFrontend, error) {
 	if client.options.ReportedOS == "" {
-		client.options.ReportedOS = "linux-64"
+		client.options.ReportedOS = defaultReportedOS()
 	}
 	switch client.options.ReportedOS {
 	case "linux", "linux-64", "win", "mac-intel", "android", "apple-ios":
@@ -91,7 +91,7 @@ func newAnyConnectFrontend(client *Client) (*anyConnectFrontend, error) {
 		return nil, E.New("unsupported AnyConnect reported OS: ", client.options.ReportedOS)
 	}
 	authenticationClient := &http.Client{
-		Transport: client.httpTransport,
+		Transport: client.wrapHTTPTransport(client.httpTransport),
 		Jar:       client.httpClient.Jar,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -106,13 +106,28 @@ func newAnyConnectFrontend(client *Client) (*anyConnectFrontend, error) {
 func (f *anyConnectFrontend) BeginAuthentication() authContinuation {
 	f.client.httpTransport.CloseIdleConnections()
 	serverURL := *f.client.serverURL
+	directCookie := f.client.takeDirectCookie()
+	if directCookie != "" {
+		_, values, directErr := newDirectCookieJar(&serverURL, directCookie, "webvpn")
+		webVPNCookie := values["webvpn"]
+		if directErr == nil && webVPNCookie == "" {
+			directErr = E.New("direct cookie does not contain webvpn")
+		}
+		return &completedAuthentication{
+			session: &anyConnectSessionState{
+				ServerURL: &serverURL,
+				Cookie:    webVPNCookie,
+			},
+			err: directErr,
+		}
+	}
 	authenticationJar, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
 	if err == nil {
 		f.authenticationClient.Jar = authenticationJar
 	} else {
 		err = E.Cause(err, "create AnyConnect authentication cookie jar")
 	}
-	return &anyConnectAuthentication{
+	authentication := &anyConnectAuthentication{
 		frontend:          f,
 		initializationErr: err,
 		stage:             anyConnectAuthenticationInitialXML,
@@ -120,6 +135,11 @@ func (f *anyConnectFrontend) BeginAuthentication() authContinuation {
 		currentURL:        &serverURL,
 		tokenGenerator:    newSoftwareTokenGenerator(f.client.options.Token),
 	}
+	if f.client.options.XMLPostDisabled {
+		authentication.stage = anyConnectAuthenticationInitialLegacy
+		authentication.xmlPost = false
+	}
+	return authentication
 }
 
 func (f *anyConnectFrontend) ConnectTunnel(ctx context.Context, obtained obtainedSession) (clientSession, error) {
@@ -137,7 +157,7 @@ func (f *anyConnectFrontend) ConnectTunnel(ctx context.Context, obtained obtaine
 	if err != nil {
 		return nil, err
 	}
-	return newAnyConnectCSTPSession(ctx, f.client, session, transport), nil
+	return newAnyConnectCSTPSession(ctx, f.client, session, transport)
 }
 
 func (a *anyConnectAuthentication) Done() <-chan error {
@@ -174,7 +194,7 @@ func (a *anyConnectAuthentication) Advance(
 	}
 	if a.advancing {
 		a.access.Unlock()
-		return nil, nil, E.Extend(ErrProtocolNotSupported, "AnyConnect authentication continuation is already advancing")
+		return nil, nil, E.Extend(ErrProtocolNotSupported, "authentication continuation is already advancing")
 	}
 	a.advancing = true
 	stage := a.stage
@@ -216,7 +236,7 @@ func (a *anyConnectAuthentication) Advance(
 		}
 		return a.advanceForm(ctx, response)
 	case anyConnectAuthenticationComplete:
-		return nil, nil, E.Extend(ErrProtocolNotSupported, "AnyConnect authentication continuation is already complete")
+		return nil, nil, E.Extend(ErrProtocolNotSupported, "authentication continuation is already complete")
 	default:
 		return nil, nil, E.Extend(ErrProtocolNotSupported, "invalid AnyConnect authentication continuation stage")
 	}
@@ -239,7 +259,7 @@ func (a *anyConnectAuthentication) advanceInitialXML(ctx context.Context) (obtai
 	}
 	if httpResponse.StatusCode != http.StatusOK {
 		if httpResponse.StatusCode == http.StatusUnauthorized || httpResponse.StatusCode == http.StatusForbidden {
-			return nil, nil, E.Errors(ErrAuthenticationFailed, E.New("AnyConnect XMLPOST initialization rejected with HTTP ", httpResponse.StatusCode))
+			return nil, nil, E.Errors(ErrAuthenticationFailed, E.New("XMLPOST initialization rejected with HTTP ", httpResponse.StatusCode))
 		}
 		a.resetForLegacyAuthentication()
 		return a.advanceInitialLegacy(ctx)
@@ -278,15 +298,15 @@ func (a *anyConnectAuthentication) advanceAuthGroup(
 ) (obtainedSession, *authenticationRequest, error) {
 	groupField := findAnyConnectAuthGroup(&a.currentForm)
 	if groupField == nil {
-		return nil, nil, E.Extend(ErrProtocolNotSupported, "AnyConnect authgroup response has no matching group_list field")
+		return nil, nil, E.Extend(ErrProtocolNotSupported, "authgroup response has no matching group_list field")
 	}
 	selectedGroup, loaded := response.Values[groupField.SubmissionKey]
 	if !loaded {
-		return nil, nil, E.Extend(ErrProtocolNotSupported, "AnyConnect authgroup response omitted ", groupField.SubmissionKey)
+		return nil, nil, E.Extend(ErrProtocolNotSupported, "authgroup response omitted ", groupField.SubmissionKey)
 	}
 	selectedChoice, loaded := findAnyConnectChoice(groupField, selectedGroup)
 	if !loaded {
-		return nil, nil, E.Extend(ErrProtocolNotSupported, "AnyConnect authgroup response selected an unknown choice: ", selectedGroup)
+		return nil, nil, E.Extend(ErrProtocolNotSupported, "authgroup response selected an unknown choice: ", selectedGroup)
 	}
 	a.selectedGroup = selectedChoice.Name
 	groupField.Value = selectedChoice.Name
@@ -337,7 +357,7 @@ func (a *anyConnectAuthentication) advanceSSOBrowser(
 		}
 		value, loaded := response.Values[field.SubmissionKey]
 		if !loaded {
-			return nil, nil, E.Extend(ErrProtocolNotSupported, "AnyConnect SSO response omitted generated token field: ", field.SubmissionKey)
+			return nil, nil, E.Extend(ErrProtocolNotSupported, "SSO response omitted generated token field: ", field.SubmissionKey)
 		}
 		field.Value = value
 	}
@@ -372,11 +392,11 @@ func (a *anyConnectAuthentication) submitAuthenticationForm(ctx context.Context)
 	if httpResponse.StatusCode != http.StatusOK {
 		if httpResponse.StatusCode == http.StatusUnauthorized || httpResponse.StatusCode == http.StatusForbidden {
 			return nil, nil, newRetryableAuthenticationError(
-				E.New("AnyConnect authentication rejected with HTTP ", httpResponse.StatusCode),
+				E.New("authentication rejected with HTTP ", httpResponse.StatusCode),
 				a.rejectedCredentialCacheKeys()...,
 			)
 		}
-		return nil, nil, anyConnectHTTPStatusError(httpResponse.StatusCode, "AnyConnect authentication form returned HTTP ")
+		return nil, nil, anyConnectHTTPStatusError(httpResponse.StatusCode, "authentication form returned HTTP ")
 	}
 	form, err := parseAnyConnectAuthenticationXML(httpResponse.Body, reportedAnyConnectOS(a.frontend.client))
 	if err != nil {
@@ -407,9 +427,9 @@ func (a *anyConnectAuthentication) processAuthenticationForm(
 			return a.advanceInitialXML(ctx)
 		}
 		if configuredCertificate {
-			a.clientCertificateFailureReason = "AnyConnect gateway did not accept the configured TLS client certificate"
+			a.clientCertificateFailureReason = "gateway did not accept the configured TLS client certificate"
 		} else {
-			a.clientCertificateFailureReason = "AnyConnect gateway requested a TLS client certificate, but none was configured"
+			a.clientCertificateFailureReason = "gateway requested a TLS client certificate, but none was configured"
 		}
 		if !a.stageUsesXMLPost() {
 			return nil, nil, E.Errors(ErrAuthenticationFailed, E.New(a.clientCertificateFailureReason))
@@ -457,7 +477,7 @@ func (a *anyConnectAuthentication) processAuthenticationForm(
 			reason = "gateway returned an empty authentication form"
 		}
 		return nil, nil, newRetryableAuthenticationError(
-			E.New("AnyConnect authentication failed: ", reason),
+			E.New("authentication failed: ", reason),
 			rejectedCacheKeys...,
 		)
 	}
@@ -543,6 +563,9 @@ func (a *anyConnectAuthentication) yieldAuthenticationRequest() (obtainedSession
 		return nil, nil, err
 	}
 	if a.currentForm.SSO.Requested {
+		if a.frontend.client.options.ExternalAuthDisabled {
+			return nil, nil, markTerminal(E.Extend(ErrProtocolNotSupported, "gateway requested disabled external authentication"))
+		}
 		if len(request.Fields) == 0 {
 			browserRequest, browserErr := a.buildSSOBrowserRequest()
 			if browserErr != nil {
@@ -605,7 +628,7 @@ func (a *anyConnectAuthentication) buildAuthenticationRequest() (*authentication
 			requestField.Kind = authFormFieldHidden
 		case anyConnectFormFieldToken:
 			if a.frontend.client.options.Token == nil {
-				return nil, markTerminal(E.New("AnyConnect gateway requested an automatic token, but no TokenOptions were configured"))
+				return nil, markTerminal(E.New("gateway requested an automatic token, but no TokenOptions were configured"))
 			}
 			requestField.Kind = authFormFieldToken
 			tokenMessage := a.currentForm.Message
@@ -633,13 +656,13 @@ func (a *anyConnectAuthentication) generateSoftwareToken(ctx context.Context, me
 
 func (a *anyConnectAuthentication) buildSSOBrowserRequest() (*authenticationRequest, error) {
 	if a.currentForm.SSO.LoginURL == "" {
-		return nil, markTerminal(E.New("AnyConnect SSO form omitted sso-v2-login URL"))
+		return nil, markTerminal(E.New("SSO form omitted sso-v2-login URL"))
 	}
 	if a.currentForm.SSO.FinalURL == "" {
-		return nil, markTerminal(E.New("AnyConnect SSO form omitted sso-v2-login-final URL"))
+		return nil, markTerminal(E.New("SSO form omitted sso-v2-login-final URL"))
 	}
 	if a.currentForm.SSO.TokenCookie == "" {
-		return nil, markTerminal(E.New("AnyConnect SSO form omitted sso-v2-token-cookie-name"))
+		return nil, markTerminal(E.New("SSO form omitted sso-v2-token-cookie-name"))
 	}
 	loginURL, err := url.Parse(a.currentForm.SSO.LoginURL)
 	if err != nil {
@@ -673,7 +696,7 @@ func (a *anyConnectAuthentication) buildSSOBrowserRequest() (*authenticationRequ
 			continue
 		}
 		if a.frontend.client.options.Token == nil {
-			return nil, markTerminal(E.New("AnyConnect SSO companion token requires TokenOptions"))
+			return nil, markTerminal(E.New("SSO companion token requires TokenOptions"))
 		}
 		tokenMessage := a.currentForm.Message
 		request.Fields = append(request.Fields, authenticationRequestField{
@@ -700,12 +723,12 @@ func (a *anyConnectAuthentication) applyAuthenticationFieldValues(response *auth
 		}
 		value, loaded := response.Values[field.SubmissionKey]
 		if !loaded {
-			return E.Extend(ErrProtocolNotSupported, "AnyConnect authentication response omitted field: ", field.SubmissionKey)
+			return E.Extend(ErrProtocolNotSupported, "authentication response omitted field: ", field.SubmissionKey)
 		}
 		if field.Kind == anyConnectFormFieldSelect {
 			choice, found := findAnyConnectChoice(field, value)
 			if !found {
-				return E.Extend(ErrProtocolNotSupported, "AnyConnect authentication response selected an unknown choice for ", field.Name, ": ", value)
+				return E.Extend(ErrProtocolNotSupported, "authentication response selected an unknown choice for ", field.Name, ": ", value)
 			}
 			value = choice.Name
 		}
@@ -720,7 +743,7 @@ func (a *anyConnectAuthentication) applySSOResponse(result *BrowserResult) error
 		return ErrInvalidBrowserAuthentication
 	}
 	if a.currentForm.SSO.FinalURL != "" && result.FinalURL != a.currentForm.SSO.FinalURL {
-		return E.Errors(ErrInvalidBrowserAuthentication, E.New("AnyConnect SSO browser did not reach the required final URL: ", a.currentForm.SSO.FinalURL))
+		return E.Errors(ErrInvalidBrowserAuthentication, E.New("SSO browser did not reach the required final URL: ", a.currentForm.SSO.FinalURL))
 	}
 	var tokenValue string
 	for _, cookie := range result.Cookies {
@@ -729,7 +752,7 @@ func (a *anyConnectAuthentication) applySSOResponse(result *BrowserResult) error
 			break
 		}
 		if cookie.Name == a.currentForm.SSO.ErrorCookie && cookie.Value != "" {
-			return newRetryableAuthenticationError(E.New("AnyConnect SSO failed: ", cookie.Value))
+			return newRetryableAuthenticationError(E.New("SSO failed: ", cookie.Value))
 		}
 	}
 	for i := range a.currentForm.Fields {
@@ -814,7 +837,7 @@ func (a *anyConnectAuthentication) doAuthenticationRequest(
 			return anyConnectHTTPResponse{}, markTerminal(E.Cause(err, "parse AnyConnect authentication redirect"))
 		}
 		if location.Scheme != "https" || location.Hostname() == "" {
-			return anyConnectHTTPResponse{}, markTerminal(E.New("AnyConnect authentication redirected to a non-HTTPS URL: ", location.String()))
+			return anyConnectHTTPResponse{}, markTerminal(E.New("authentication redirected to a non-HTTPS URL: ", location.String()))
 		}
 		sameEndpoint := equalAnyConnectURLHost(currentURL, location)
 		if xmlPostProbe && sameEndpoint {
@@ -834,7 +857,7 @@ func (a *anyConnectAuthentication) doAuthenticationRequest(
 	if xmlPostProbe {
 		return anyConnectHTTPResponse{}, errAnyConnectXMLPostFallback
 	}
-	return anyConnectHTTPResponse{}, markTerminal(E.New("AnyConnect authentication exceeded ", maximumRequests, " redirect requests"))
+	return anyConnectHTTPResponse{}, markTerminal(E.New("authentication exceeded ", maximumRequests, " redirect requests"))
 }
 
 func (a *anyConnectAuthentication) processAutomaticAuthenticationReply(
@@ -848,7 +871,7 @@ func (a *anyConnectAuthentication) processAutomaticAuthenticationReply(
 		return nil, nil, err
 	}
 	if httpResponse.StatusCode != http.StatusOK {
-		return nil, nil, anyConnectHTTPStatusError(httpResponse.StatusCode, "AnyConnect automatic authentication reply returned HTTP ")
+		return nil, nil, anyConnectHTTPStatusError(httpResponse.StatusCode, "automatic authentication reply returned HTTP ")
 	}
 	form, err := parseAnyConnectAuthenticationXML(httpResponse.Body, reportedAnyConnectOS(a.frontend.client))
 	if err != nil {
@@ -876,7 +899,7 @@ func (a *anyConnectAuthentication) refreshAfterHostScan(ctx context.Context) (ob
 		return nil, nil, err
 	}
 	if httpResponse.StatusCode != http.StatusOK {
-		return nil, nil, anyConnectHTTPStatusError(httpResponse.StatusCode, "AnyConnect post-hostscan refresh returned HTTP ")
+		return nil, nil, anyConnectHTTPStatusError(httpResponse.StatusCode, "post-hostscan refresh returned HTTP ")
 	}
 	form, err := parseAnyConnectAuthenticationXML(httpResponse.Body, reportedAnyConnectOS(a.frontend.client))
 	if err != nil {
@@ -892,7 +915,7 @@ func (a *anyConnectAuthentication) completeAuthentication(sessionToken string) (
 	}
 	cookie := a.webVPNCookie()
 	if cookie == "" {
-		return nil, nil, markTerminal(E.New("AnyConnect authentication succeeded without a webvpn cookie"))
+		return nil, nil, markTerminal(E.New("authentication succeeded without a webvpn cookie"))
 	}
 	a.stage = anyConnectAuthenticationComplete
 	for i := range a.currentForm.Fields {
@@ -938,7 +961,7 @@ func (a *anyConnectAuthentication) resolveAuthenticationURL(reference string) (*
 	}
 	resolved := a.currentURL.ResolveReference(referenceURL)
 	if resolved.Scheme != "https" || resolved.Hostname() == "" {
-		return nil, markTerminal(E.New("AnyConnect authentication form action is not HTTPS: ", resolved.String()))
+		return nil, markTerminal(E.New("authentication form action is not HTTPS: ", resolved.String()))
 	}
 	return resolved, nil
 }
@@ -1027,7 +1050,7 @@ func (a *anyConnectAuthentication) handleMultipleCertificateRequest(
 	form anyConnectForm,
 ) (obtainedSession, *authenticationRequest, error) {
 	if a.frontend.client.mcaIdentity == nil {
-		return nil, nil, E.Errors(ErrAuthenticationFailed, E.New("AnyConnect gateway requested multiple-certificate authentication, but no MCA identity was configured"))
+		return nil, nil, E.Errors(ErrAuthenticationFailed, E.New("gateway requested multiple-certificate authentication, but no MCA identity was configured"))
 	}
 	form.Opaque = a.opaque
 	body, err := buildAnyConnectMCAResponse(a.frontend.client, a.frontend.client.mcaIdentity, form)
@@ -1120,14 +1143,14 @@ func reportedAnyConnectOS(client *Client) string {
 	if client.options.ReportedOS != "" {
 		return client.options.ReportedOS
 	}
-	return "linux-64"
+	return defaultReportedOS()
 }
 
 func anyConnectUserAgent(client *Client) string {
 	if client.options.UserAgent != "" {
 		return client.options.UserAgent
 	}
-	return "AnyConnect-compatible OpenConnect VPN Agent"
+	return "AnyConnect-compatible OpenConnect VPN Agent " + defaultClientVersion
 }
 
 func parseAnyConnectRemoteAddress(address net.Addr) netip.Addr {
@@ -1351,12 +1374,19 @@ func appendAnyConnectURLEncoded(content *strings.Builder, value string) {
 }
 
 func encodeAnyConnectVersionAndDevice(encoder *xml.Encoder, client *Client) error {
-	version := anyConnectUserAgent(client)
-	err := encodeAnyConnectTextElement(encoder, "version", version, []xml.Attr{{Name: xml.Name{Local: "who"}, Value: "vpn"}})
+	err := encodeAnyConnectTextElement(encoder, "version", client.options.Version, []xml.Attr{{Name: xml.Name{Local: "who"}, Value: "vpn"}})
 	if err != nil {
 		return err
 	}
-	return encodeAnyConnectTextElement(encoder, "device-id", reportedAnyConnectOS(client), nil)
+	var attributes []xml.Attr
+	if client.options.Mobile != nil {
+		attributes = []xml.Attr{
+			{Name: xml.Name{Local: "platform-version"}, Value: client.options.Mobile.PlatformVersion},
+			{Name: xml.Name{Local: "device-type"}, Value: client.options.Mobile.DeviceType},
+			{Name: xml.Name{Local: "unique-id"}, Value: client.options.Mobile.DeviceUniqueID},
+		}
+	}
+	return encodeAnyConnectTextElement(encoder, "device-id", reportedAnyConnectOS(client), attributes)
 }
 
 func encodeAnyConnectCapabilities(encoder *xml.Encoder, client *Client) error {
@@ -1365,9 +1395,11 @@ func encodeAnyConnectCapabilities(encoder *xml.Encoder, client *Client) error {
 	if err != nil {
 		return E.Cause(err, "encode AnyConnect authentication capabilities")
 	}
-	err = encodeAnyConnectTextElement(encoder, "auth-method", "single-sign-on-v2", nil)
-	if err != nil {
-		return err
+	if !client.options.ExternalAuthDisabled {
+		err = encodeAnyConnectTextElement(encoder, "auth-method", "single-sign-on-v2", nil)
+		if err != nil {
+			return err
+		}
 	}
 	if client.mcaIdentity != nil {
 		err = encodeAnyConnectTextElement(encoder, "auth-method", "multiple-cert", nil)

@@ -53,14 +53,15 @@ func TestM3PPPSystemPPPDInterop(t *testing.T) {
 	buildPPPDInteropImage(t, ctx)
 
 	t.Run("F5StreamDualStack", func(t *testing.T) {
-		peer := startPPPDPeerContainer(t, ctx, "f5", false, map[string]string{
+		peer := startPPPDPeerContainer(t, ctx, "f5", false, false, map[string]string{
 			"MUTATE_CONTROL":  "1",
 			"SPLIT_STREAM":    "1",
 			"COALESCE_STREAM": "1",
 		})
+
 		connection := dialPPPDPeer(t, ctx, peer, false)
 		incoming := make(chan []byte, 512)
-		link := startPPPDLink(t, ctx, peer, connection, false, pppEncapsulationF5, incoming)
+		link := startPPPDLink(t, ctx, peer, connection, false, pppEncapsulationF5, true, true, incoming, nil)
 		assertPPPDConfiguration(t, link.TunnelConfiguration())
 		exercisePPPDIPv4(t, link, incoming, 1)
 		exercisePPPDIPv6(t, link, incoming, 1)
@@ -89,13 +90,14 @@ func TestM3PPPSystemPPPDInterop(t *testing.T) {
 	})
 
 	t.Run("VJAndCCPReject", func(t *testing.T) {
-		peer := startPPPDPeerContainer(t, ctx, "f5", false, map[string]string{
+		peer := startPPPDPeerContainer(t, ctx, "f5", false, false, map[string]string{
 			"ENABLE_VJ":  "1",
 			"INJECT_CCP": "1",
 		})
+
 		connection := dialPPPDPeer(t, ctx, peer, false)
 		incoming := make(chan []byte, 512)
-		link := startPPPDLink(t, ctx, peer, connection, false, pppEncapsulationF5, incoming)
+		link := startPPPDLink(t, ctx, peer, connection, false, pppEncapsulationF5, true, true, incoming, nil)
 		waitPPPDPeerMarker(t, ctx, peer, "CLIENT_IPCP_CONFIG_REJECT")
 		waitPPPDPeerMarker(t, ctx, peer, "PPPD_SHIM_CCP_CONFIG_REQUEST")
 		waitPPPDPeerMarker(t, ctx, peer, "CLIENT_CCP_PROTOCOL_REJECT")
@@ -106,14 +108,15 @@ func TestM3PPPSystemPPPDInterop(t *testing.T) {
 	})
 
 	t.Run("F5HDLCWireTolerance", func(t *testing.T) {
-		peer := startPPPDPeerContainer(t, ctx, "f5-hdlc", false, map[string]string{
+		peer := startPPPDPeerContainer(t, ctx, "f5-hdlc", false, false, map[string]string{
 			"CORRUPT_FIRST_HDLC": "1",
 			"OMIT_INITIAL_HDLC":  "1",
 			"SPLIT_HDLC_ESCAPE":  "1",
 		})
+
 		connection := dialPPPDPeer(t, ctx, peer, false)
 		incoming := make(chan []byte, 512)
-		link := startPPPDLink(t, ctx, peer, connection, false, pppEncapsulationF5HDLC, incoming)
+		link := startPPPDLink(t, ctx, peer, connection, false, pppEncapsulationF5HDLC, true, true, incoming, nil)
 		assertPPPDConfiguration(t, link.TunnelConfiguration())
 		exercisePPPDIPv4(t, link, incoming, 2)
 		logs := pppdPeerLogs(t, ctx, peer)
@@ -129,10 +132,10 @@ func TestM3PPPSystemPPPDInterop(t *testing.T) {
 	})
 
 	t.Run("IPv4Only", func(t *testing.T) {
-		peer := startPPPDPeerContainer(t, ctx, "f5", false, nil)
+		peer := startPPPDPeerContainer(t, ctx, "f5", false, false, nil)
 		connection := dialPPPDPeer(t, ctx, peer, false)
 		incoming := make(chan []byte, 512)
-		link := startPPPDLinkFamilies(t, ctx, peer, connection, false, pppEncapsulationF5, true, false, incoming, nil)
+		link := startPPPDLink(t, ctx, peer, connection, false, pppEncapsulationF5, true, false, incoming, nil)
 		configuration := link.TunnelConfiguration()
 		if configuration.MTU != 1320 || !slices.Equal(configuration.Addresses, []netip.Prefix{netip.MustParsePrefix("192.0.2.2/32")}) ||
 			len(configuration.DNS) != 2 || len(configuration.NBNS) != 2 {
@@ -146,10 +149,10 @@ func TestM3PPPSystemPPPDInterop(t *testing.T) {
 	})
 
 	t.Run("IPv6Only", func(t *testing.T) {
-		peer := startPPPDPeerContainer(t, ctx, "f5", false, nil)
+		peer := startPPPDPeerContainer(t, ctx, "f5", false, false, nil)
 		connection := dialPPPDPeer(t, ctx, peer, false)
 		incoming := make(chan []byte, 512)
-		link := startPPPDLinkFamilies(t, ctx, peer, connection, false, pppEncapsulationF5, false, true, incoming, nil)
+		link := startPPPDLink(t, ctx, peer, connection, false, pppEncapsulationF5, false, true, incoming, nil)
 		configuration := link.TunnelConfiguration()
 		if configuration.MTU != 1320 || !slices.Equal(configuration.Addresses, []netip.Prefix{netip.MustParsePrefix("fe80::2/64")}) ||
 			len(configuration.DNS) != 0 || len(configuration.NBNS) != 0 {
@@ -163,10 +166,10 @@ func TestM3PPPSystemPPPDInterop(t *testing.T) {
 	})
 
 	t.Run("DualStackPeerRejectsIPv6", func(t *testing.T) {
-		peer := startPPPDPeerContainer(t, ctx, "f5", false, map[string]string{"REJECT_CLIENT_IP6CP": "1"})
+		peer := startPPPDPeerContainer(t, ctx, "f5", false, false, map[string]string{"REJECT_CLIENT_IP6CP": "1"})
 		connection := dialPPPDPeer(t, ctx, peer, false)
 		incoming := make(chan []byte, 512)
-		link := startPPPDLink(t, ctx, peer, connection, false, pppEncapsulationF5, incoming)
+		link := startPPPDLink(t, ctx, peer, connection, false, pppEncapsulationF5, true, true, incoming, nil)
 		configuration := link.TunnelConfiguration()
 		if !slices.Equal(configuration.Addresses, []netip.Prefix{netip.MustParsePrefix("192.0.2.2/32")}) {
 			t.Fatalf("IPv6 rejection did not preserve IPv4 PPP: %+v", configuration)
@@ -179,10 +182,10 @@ func TestM3PPPSystemPPPDInterop(t *testing.T) {
 	})
 
 	t.Run("DualStackPeerZeroNaksIPv6", func(t *testing.T) {
-		peer := startPPPDPeerContainer(t, ctx, "f5", false, map[string]string{"ZERO_NAK_CLIENT_IP6CP": "1"})
+		peer := startPPPDPeerContainer(t, ctx, "f5", false, false, map[string]string{"ZERO_NAK_CLIENT_IP6CP": "1"})
 		connection := dialPPPDPeer(t, ctx, peer, false)
 		incoming := make(chan []byte, 512)
-		link := startPPPDLink(t, ctx, peer, connection, false, pppEncapsulationF5, incoming)
+		link := startPPPDLink(t, ctx, peer, connection, false, pppEncapsulationF5, true, true, incoming, nil)
 		configuration := link.TunnelConfiguration()
 		if !slices.Equal(configuration.Addresses, []netip.Prefix{netip.MustParsePrefix("192.0.2.2/32")}) {
 			t.Fatalf("zero IPv6 Nak did not preserve IPv4 PPP: %+v", configuration)
@@ -195,7 +198,7 @@ func TestM3PPPSystemPPPDInterop(t *testing.T) {
 	})
 
 	t.Run("IPv6OnlyPeerRejectsIPv6", func(t *testing.T) {
-		peer := startPPPDPeerContainer(t, ctx, "f5", false, map[string]string{"REJECT_CLIENT_IP6CP": "1"})
+		peer := startPPPDPeerContainer(t, ctx, "f5", false, false, map[string]string{"REJECT_CLIENT_IP6CP": "1"})
 		connection := dialPPPDPeer(t, ctx, peer, false)
 		link, err := newPPPLink(ctx, pppLinkConfig{
 			Carrier:             pppCarrierConfig{Connection: connection},
@@ -219,11 +222,11 @@ func TestM3PPPSystemPPPDInterop(t *testing.T) {
 	})
 
 	t.Run("ContextCancellationCleanup", func(t *testing.T) {
-		peer := startPPPDPeerContainer(t, ctx, "f5", false, nil)
+		peer := startPPPDPeerContainer(t, ctx, "f5", false, false, nil)
 		linkContext, cancelLink := context.WithCancel(ctx)
 		connection := dialPPPDPeer(t, linkContext, peer, false)
 		incoming := make(chan []byte, 512)
-		link := startPPPDLink(t, linkContext, peer, connection, false, pppEncapsulationF5, incoming)
+		link := startPPPDLink(t, linkContext, peer, connection, false, pppEncapsulationF5, true, true, incoming, nil)
 		cancelLink()
 		timer := time.NewTimer(3 * time.Second)
 		defer timer.Stop()
@@ -236,12 +239,13 @@ func TestM3PPPSystemPPPDInterop(t *testing.T) {
 	})
 
 	t.Run("FortinetDatagramTerminateRetry", func(t *testing.T) {
-		peer := startPPPDPeerContainer(t, ctx, "fortinet", true, map[string]string{
+		peer := startPPPDPeerContainer(t, ctx, "fortinet", true, false, map[string]string{
 			"DROP_TERM_REQUESTS": "2",
 		})
+
 		connection := dialPPPDPeer(t, ctx, peer, true)
 		incoming := make(chan []byte, 512)
-		link := startPPPDLink(t, ctx, peer, connection, true, pppEncapsulationFortinet, incoming)
+		link := startPPPDLink(t, ctx, peer, connection, true, pppEncapsulationFortinet, true, true, incoming, nil)
 		assertPPPDConfiguration(t, link.TunnelConfiguration())
 		exercisePPPDIPv4(t, link, incoming, 3)
 		exercisePPPDIPv6(t, link, incoming, 3)
@@ -263,7 +267,7 @@ func TestM3PPPSystemPPPDInterop(t *testing.T) {
 	})
 
 	t.Run("F5LateDatagramTakeover", func(t *testing.T) {
-		peer := startPPPDPeerDualCarrier(t, ctx, "f5", nil)
+		peer := startPPPDPeerContainer(t, ctx, "f5", false, true, nil)
 		streamConnection := dialPPPDPeer(t, ctx, peer, false)
 		incoming := make(chan []byte, 512)
 		deliveryStarted := make(chan struct{}, 1)
@@ -278,7 +282,7 @@ func TestM3PPPSystemPPPDInterop(t *testing.T) {
 				close(releaseDelivery)
 			})
 		}
-		link := startPPPDLinkFamilies(t, ctx, peer, streamConnection, false, pppEncapsulationF5, true, true, incoming, func(packet []byte) {
+		link := startPPPDLink(t, ctx, peer, streamConnection, false, pppEncapsulationF5, true, true, incoming, func(packet []byte) {
 			if validatePPPDIPv4EchoReply(packet, oldCarrierClient, oldCarrierPeer, 0x4d33, 5, oldCarrierPayload) != nil {
 				return
 			}
@@ -292,6 +296,7 @@ func TestM3PPPSystemPPPDInterop(t *testing.T) {
 			deliveryStarted <- struct{}{}
 			<-releaseDelivery
 		})
+
 		t.Cleanup(releaseOldDelivery)
 		before := link.TunnelConfiguration()
 		exercisePPPDIPv4(t, link, incoming, 4)
@@ -384,9 +389,10 @@ func TestM3PPPSystemPPPDInterop(t *testing.T) {
 	})
 
 	t.Run("F5BlockedWriterTakeover", func(t *testing.T) {
-		peer := startPPPDPeerDualCarrier(t, ctx, "f5", map[string]string{
+		peer := startPPPDPeerContainer(t, ctx, "f5", false, true, map[string]string{
 			"PAUSE_CLIENT_READS_AFTER_IPV4": "64",
 		})
+
 		streamConnection := dialPPPDPeer(t, ctx, peer, false)
 		tcpConnection, loaded := streamConnection.(*net.TCPConn)
 		if !loaded {
@@ -397,7 +403,7 @@ func TestM3PPPSystemPPPDInterop(t *testing.T) {
 			t.Fatal(E.Cause(err, "reduce real pppd carrier write buffer"))
 		}
 		incoming := make(chan []byte, 512)
-		link := startPPPDLinkFamilies(t, ctx, peer, streamConnection, false, pppEncapsulationF5, true, false, incoming, nil)
+		link := startPPPDLink(t, ctx, peer, streamConnection, false, pppEncapsulationF5, true, false, incoming, nil)
 		before := link.TunnelConfiguration()
 		exercisePPPDIPv4(t, link, incoming, 9)
 		blockedWrite := blockPPPDCarrierWrite(t, link)
@@ -460,9 +466,10 @@ func TestM3PPPSystemPPPDInterop(t *testing.T) {
 	})
 
 	t.Run("F5BlockedWriterClose", func(t *testing.T) {
-		peer := startPPPDPeerContainer(t, ctx, "f5", false, map[string]string{
+		peer := startPPPDPeerContainer(t, ctx, "f5", false, false, map[string]string{
 			"PAUSE_CLIENT_READS_AFTER_IPV4": "64",
 		})
+
 		connection := dialPPPDPeer(t, ctx, peer, false)
 		tcpConnection, loaded := connection.(*net.TCPConn)
 		if !loaded {
@@ -473,7 +480,7 @@ func TestM3PPPSystemPPPDInterop(t *testing.T) {
 			t.Fatal(E.Cause(err, "reduce real pppd carrier write buffer"))
 		}
 		incoming := make(chan []byte, 512)
-		link := startPPPDLinkFamilies(t, ctx, peer, connection, false, pppEncapsulationF5, true, false, incoming, nil)
+		link := startPPPDLink(t, ctx, peer, connection, false, pppEncapsulationF5, true, false, incoming, nil)
 		exercisePPPDIPv4(t, link, incoming, 11)
 		blockedWrite := blockPPPDCarrierWrite(t, link)
 		waitPPPDPeerMarker(t, ctx, peer, "PPPD_CLIENT_READS_PAUSED")
@@ -518,15 +525,7 @@ func buildPPPDInteropImage(t *testing.T, ctx context.Context) {
 	}
 }
 
-func startPPPDPeerContainer(t *testing.T, ctx context.Context, framing string, datagram bool, environment map[string]string) pppdPeerContainer {
-	return startPPPDPeerContainerMode(t, ctx, framing, datagram, false, environment)
-}
-
-func startPPPDPeerDualCarrier(t *testing.T, ctx context.Context, framing string, environment map[string]string) pppdPeerContainer {
-	return startPPPDPeerContainerMode(t, ctx, framing, false, true, environment)
-}
-
-func startPPPDPeerContainerMode(t *testing.T, ctx context.Context, framing string, datagram bool, dualCarrier bool, environment map[string]string) pppdPeerContainer {
+func startPPPDPeerContainer(t *testing.T, ctx context.Context, framing string, datagram bool, dualCarrier bool, environment map[string]string) pppdPeerContainer {
 	t.Helper()
 	name := "sing-openconnect-pppd-m3-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	protocol := "tcp"
@@ -644,11 +643,7 @@ func dialPPPDPeer(t *testing.T, ctx context.Context, peer pppdPeerContainer, dat
 	return connection
 }
 
-func startPPPDLink(t *testing.T, ctx context.Context, peer pppdPeerContainer, connection net.Conn, datagram bool, encapsulation pppEncapsulation, incoming chan<- []byte) *pppLink {
-	return startPPPDLinkFamilies(t, ctx, peer, connection, datagram, encapsulation, true, true, incoming, nil)
-}
-
-func startPPPDLinkFamilies(t *testing.T, ctx context.Context, peer pppdPeerContainer, connection net.Conn, datagram bool, encapsulation pppEncapsulation, wantIPv4 bool, wantIPv6 bool, incoming chan<- []byte, beforeDeliver func([]byte)) *pppLink {
+func startPPPDLink(t *testing.T, ctx context.Context, peer pppdPeerContainer, connection net.Conn, datagram bool, encapsulation pppEncapsulation, wantIPv4 bool, wantIPv6 bool, incoming chan<- []byte, beforeDeliver func([]byte)) *pppLink {
 	t.Helper()
 	link, err := newPPPLink(ctx, pppLinkConfig{
 		Carrier:                pppCarrierConfig{Connection: connection, Datagram: datagram},

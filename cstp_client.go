@@ -11,7 +11,7 @@ import (
 	"net/netip"
 	"net/textproto"
 	"net/url"
-	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -24,7 +24,7 @@ import (
 const (
 	cstpConnectTimeout         = 30 * time.Second
 	cstpDefaultBaseMTU         = 1406
-	cstpDefaultTunnelMTU       = 1296
+	cstpDTLSOverhead           = 82
 	cstpLegacyMasterSecretSize = 48
 	cstpMaximumMTU             = 65535
 	cstpMaximumHeaderSize      = 1024 * 1024
@@ -40,6 +40,7 @@ type cstpDTLSOption struct {
 
 type cstpNegotiatedState struct {
 	Configuration TunnelConfiguration
+	Compression   anyConnectCompression
 	DPD           time.Duration
 	Keepalive     time.Duration
 	Rekey         time.Duration
@@ -121,7 +122,7 @@ func connectCSTP(ctx context.Context, client *Client, session *anyConnectSession
 		return nil, E.Cause(err, "set CSTP connection deadline")
 	}
 	tlsConfiguration := client.tlsConfig.Clone()
-	if client.options.TLSConfig.Config == nil || client.options.TLSConfig.Config.ServerName == "" {
+	if tlsConfiguration.ServerName == "" {
 		tlsConfiguration.ServerName = serverURL.Hostname()
 	}
 	tlsConfiguration.NextProtos = []string{"http/1.1"}
@@ -137,7 +138,7 @@ func connectCSTP(ctx context.Context, client *Client, session *anyConnectSession
 			return nil, E.Cause(err, "generate AnyConnect legacy DTLS master secret")
 		}
 	}
-	request, err := buildCSTPConnectRequest(client, sessionSnapshot, masterSecret)
+	request, err := buildCSTPConnectRequest(client, sessionSnapshot, masterSecret, rawConnection.RemoteAddr())
 	if err != nil {
 		return nil, markTerminal(err)
 	}
@@ -173,6 +174,10 @@ func connectCSTP(ctx context.Context, client *Client, session *anyConnectSession
 			return nil, rejection
 		}
 		return nil, markTerminal(E.Errors(ErrProtocolNotSupported, rejection))
+	}
+	connectedAddress := parseAnyConnectRemoteAddress(rawConnection.RemoteAddr())
+	if connectedAddress.IsValid() {
+		sessionSnapshot.AuthenticatedAddress = connectedAddress
 	}
 	negotiated, err := parseCSTPResponse(headers, dtlsOptions, serverURL, sessionSnapshot.AuthenticatedAddress, masterSecret, client)
 	if err != nil {
@@ -277,13 +282,16 @@ func readCSTPResponseHeaders(reader *bufio.Reader) (http.Header, []cstpDTLSOptio
 	return http.Header(mimeHeaders), dtlsOptions, nil
 }
 
-func buildCSTPConnectRequest(client *Client, session *anyConnectSessionState, masterSecret []byte) ([]byte, error) {
+func buildCSTPConnectRequest(
+	client *Client,
+	session *anyConnectSessionState,
+	masterSecret []byte,
+	remoteAddress net.Addr,
+) ([]byte, error) {
 	serverURL := session.ServerURL
 	userAgent := anyConnectUserAgent(client)
-	localHostname, err := os.Hostname()
-	if err != nil || localHostname == "" {
-		localHostname = "localhost"
-	}
+	localHostname := client.options.LocalHostname
+	baseMTU, tunnelMTU := calculateCSTPRequestMTU(client.options.BaseMTU, client.options.MTU, remoteAddress)
 	for name, value := range map[string]string{
 		"server":         serverURL.Host,
 		"user agent":     userAgent,
@@ -305,12 +313,39 @@ func buildCSTPConnectRequest(client *Client, session *anyConnectSessionState, ma
 	request.WriteString("\r\nX-CSTP-Version: 1\r\nX-CSTP-Hostname: ")
 	request.WriteString(localHostname)
 	request.WriteString("\r\nX-CSTP-Protocol: Copyright (c) 2004 Cisco Systems, Inc.\r\n")
+	if client.options.Mobile != nil {
+		request.WriteString("X-AnyConnect-Identifier-ClientVersion: ")
+		request.WriteString(client.options.Version)
+		request.WriteString("\r\nX-AnyConnect-Identifier-Platform: ")
+		request.WriteString(reportedAnyConnectOS(client))
+		request.WriteString("\r\nX-AnyConnect-Identifier-PlatformVersion: ")
+		request.WriteString(client.options.Mobile.PlatformVersion)
+		request.WriteString("\r\nX-AnyConnect-Identifier-DeviceType: ")
+		request.WriteString(client.options.Mobile.DeviceType)
+		request.WriteString("\r\nX-AnyConnect-Identifier-Device-UniqueID: ")
+		request.WriteString(client.options.Mobile.DeviceUniqueID)
+		request.WriteString("\r\n")
+	}
+	if !client.options.CompressionDisabled {
+		request.WriteString("X-CSTP-Accept-Encoding: oc-lz4,lzs")
+		if client.options.CompressionMode == CompressionModeAll {
+			request.WriteString(",deflate")
+		}
+		request.WriteString("\r\n")
+	}
 	request.WriteString("X-CSTP-Base-MTU: ")
-	request.WriteString(strconv.Itoa(cstpDefaultBaseMTU))
+	request.WriteString(strconv.FormatUint(uint64(baseMTU), 10))
 	request.WriteString("\r\nX-CSTP-MTU: ")
-	request.WriteString(strconv.Itoa(cstpDefaultTunnelMTU))
-	request.WriteString("\r\nX-CSTP-Address-Type: IPv6,IPv4\r\nX-CSTP-Full-IPv6-Capability: true\r\n")
+	request.WriteString(strconv.FormatUint(uint64(tunnelMTU), 10))
+	if client.options.IPv6Disabled {
+		request.WriteString("\r\nX-CSTP-Address-Type: IPv4\r\n")
+	} else {
+		request.WriteString("\r\nX-CSTP-Address-Type: IPv6,IPv4\r\nX-CSTP-Full-IPv6-Capability: true\r\n")
+	}
 	for _, address := range session.PreviousAddresses {
+		if client.options.IPv6Disabled && address.Addr().Is6() {
+			continue
+		}
 		request.WriteString("X-CSTP-Address: ")
 		request.WriteString(address.Addr().String())
 		request.WriteString("\r\n")
@@ -319,15 +354,58 @@ func buildCSTPConnectRequest(client *Client, session *anyConnectSessionState, ma
 		request.WriteString("X-DTLS-Master-Secret: ")
 		request.WriteString(strings.ToUpper(hex.EncodeToString(masterSecret)))
 		request.WriteString("\r\n")
-		request.WriteString("X-DTLS-CipherSuite: PSK-NEGOTIATE:OC2-DTLS1_2-CHACHA20-POLY1305:OC-DTLS1_2-AES256-GCM:OC-DTLS1_2-AES128-GCM:DHE-RSA-AES256-SHA:DHE-RSA-AES128-SHA:AES256-SHA:AES128-SHA")
-		if client.options.AllowInsecureCrypto {
-			request.WriteString(":DES-CBC3-SHA")
+		if client.options.DTLSCipherSuites != "" || client.options.DTLS12CipherSuites != "" {
+			if client.options.DTLSCipherSuites != "" {
+				request.WriteString("X-DTLS-CipherSuite: ")
+				request.WriteString(client.options.DTLSCipherSuites)
+				request.WriteString("\r\n")
+			}
+			if client.options.DTLS12CipherSuites != "" {
+				request.WriteString("X-DTLS12-CipherSuite: ")
+				request.WriteString(client.options.DTLS12CipherSuites)
+				request.WriteString("\r\n")
+			}
+		} else {
+			request.WriteString("X-DTLS-CipherSuite: PSK-NEGOTIATE:OC2-DTLS1_2-CHACHA20-POLY1305:OC-DTLS1_2-AES256-GCM:OC-DTLS1_2-AES128-GCM:DHE-RSA-AES256-SHA:DHE-RSA-AES128-SHA:AES256-SHA:AES128-SHA")
+			if client.options.AllowInsecureCrypto {
+				request.WriteString(":DES-CBC3-SHA:DES-CBC-SHA")
+			}
+			request.WriteString("\r\n")
+			request.WriteString("X-DTLS12-CipherSuite: ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-GCM-SHA256:DHE-RSA-AES256-SHA:DHE-RSA-AES128-SHA:AES256-SHA:AES128-SHA\r\n")
 		}
-		request.WriteString("\r\n")
-		request.WriteString("X-DTLS12-CipherSuite: ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-GCM-SHA256:DHE-RSA-AES256-SHA:DHE-RSA-AES128-SHA:AES256-SHA:AES128-SHA\r\n")
+		if !client.options.CompressionDisabled {
+			request.WriteString("X-DTLS-Accept-Encoding: oc-lz4,lzs\r\n")
+		}
 	}
 	request.WriteString("\r\n")
 	return []byte(request.String()), nil
+}
+
+func calculateCSTPRequestMTU(baseMTU uint32, tunnelMTU uint32, remoteAddress net.Addr) (uint32, uint32) {
+	if baseMTU == 0 {
+		baseMTU = cstpDefaultBaseMTU
+	}
+	if baseMTU < 1280 {
+		baseMTU = 1280
+	}
+	if tunnelMTU != 0 {
+		return baseMTU, tunnelMTU
+	}
+	ipHeaderSize := uint32(20)
+	if remoteAddress != nil {
+		host, _, err := net.SplitHostPort(remoteAddress.String())
+		if err == nil {
+			address, parseErr := netip.ParseAddr(strings.Trim(host, "[]"))
+			if parseErr == nil && address.Is6() {
+				ipHeaderSize = 40
+			}
+		}
+	}
+	overhead := ipHeaderSize + 8 + cstpDTLSOverhead
+	if baseMTU <= overhead {
+		return baseMTU, 1
+	}
+	return baseMTU, baseMTU - overhead
 }
 
 func parseCSTPStatusLine(line string) (int, error) {
@@ -375,12 +453,21 @@ func parseCSTPResponse(
 		return result, E.New("CSTP server did not provide a valid MTU")
 	}
 	result.Configuration.MTU = uint32(mtu)
+	result.Configuration.RemoteAddress = authenticatedAddress.Unmap()
 	result.Configuration.Addresses, err = parseCSTPAddresses(headers)
 	if err != nil {
 		return result, err
 	}
 	if len(result.Configuration.Addresses) == 0 {
 		return result, E.New("CSTP server did not provide a tunnel address")
+	}
+	if client.options.IPv6Disabled {
+		result.Configuration.Addresses = slices.DeleteFunc(result.Configuration.Addresses, func(prefix netip.Prefix) bool {
+			return prefix.Addr().Is6()
+		})
+		if len(result.Configuration.Addresses) == 0 {
+			return result, E.New("CSTP server did not provide an IPv4 tunnel address")
+		}
 	}
 	result.Configuration.Routes, err = parseCSTPRoutes(headers.Values("X-CSTP-Split-Include"), headers.Values("X-CSTP-Split-Include-IP6"))
 	if err != nil {
@@ -415,6 +502,9 @@ func parseCSTPResponse(
 	if err != nil {
 		return result, err
 	}
+	if client.options.DPDInterval > 0 {
+		result.DPD = client.options.DPDInterval
+	}
 	result.Keepalive, err = parseCSTPDuration(headers.Get("X-CSTP-Keepalive"), "X-CSTP-Keepalive")
 	if err != nil {
 		return result, err
@@ -447,9 +537,17 @@ func parseCSTPResponse(
 			}
 		}
 	}
-	if encoding := headers.Get("X-CSTP-Content-Encoding"); encoding != "" {
-		return result, E.Extend(ErrProtocolNotSupported, "negotiated CSTP compression: ", encoding)
+	result.Compression, err = parseAnyConnectCompression(
+		headers.Get("X-CSTP-Content-Encoding"),
+		"X-CSTP-Content-Encoding",
+		client.options.CompressionDisabled,
+		client.options.CompressionMode,
+		true,
+	)
+	if err != nil {
+		return result, err
 	}
+	result.Configuration = normalizeTunnelConfiguration(result.Configuration, client.options.IPv6Disabled)
 	if client.options.NoUDP {
 		return result, nil
 	}
@@ -458,6 +556,9 @@ func parseCSTPResponse(
 		return result, err
 	}
 	result.DTLS = dtlsNegotiation
+	if result.DTLS != nil && client.options.DPDInterval > 0 {
+		result.DTLS.DPD = client.options.DPDInterval
+	}
 	return result, nil
 }
 
@@ -484,6 +585,7 @@ func parseCSTPDTLSNegotiation(
 		Dialer:              client.options.Dialer,
 		MTU:                 mtu,
 		AllowInsecureCrypto: client.options.AllowInsecureCrypto,
+		Logger:              client.options.Logger,
 	}
 	for _, option := range dtlsOptions {
 		headerName := "X-DTLS-" + option.Suffix
@@ -511,8 +613,15 @@ func parseCSTPDTLSNegotiation(
 				return nil, E.New(headerName, " must not be empty")
 			}
 		case "content-encoding":
-			if option.Value != "" {
-				return nil, E.Extend(ErrProtocolNotSupported, "negotiated DTLS compression: ", option.Value)
+			negotiation.Compression, err = parseAnyConnectCompression(
+				option.Value,
+				headerName,
+				client.options.CompressionDisabled,
+				client.options.CompressionMode,
+				false,
+			)
+			if err != nil {
+				return nil, err
 			}
 		case "port":
 			parsedPort, parseErr := strconv.ParseUint(option.Value, 10, 16)

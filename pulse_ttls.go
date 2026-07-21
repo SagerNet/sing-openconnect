@@ -110,12 +110,12 @@ func (c *pulseTTLSConn) receiveNextFragment() error {
 		c.messageLeft = totalLength - uint32(len(fragment))
 	} else if flags&pulseTTLSFlagLength != 0 {
 		if len(fragment) < 4 {
-			return E.New("Pulse EAP-TTLS length flag omitted its value")
+			return E.New("EAP-TTLS length flag omitted its value")
 		}
 		totalLength := binary.BigEndian.Uint32(fragment[:4])
 		fragment = fragment[4:]
 		if totalLength > pulseConfigurationFrameLimit || totalLength != uint32(len(fragment)) || len(fragment) == 0 {
-			return E.New("Pulse EAP-TTLS unfragmented message length mismatch")
+			return E.New("EAP-TTLS unfragmented message length mismatch")
 		}
 	} else if len(fragment) == 0 {
 		return E.New("empty Pulse EAP-TTLS data packet")
@@ -137,7 +137,7 @@ func (c *pulseTTLSConn) Write(content []byte) (int, error) {
 	}
 	c.stateAccess.Unlock()
 	if len(c.sendBuffer) > pulseConfigurationFrameLimit-len(content) {
-		return 0, E.New("Pulse EAP-TTLS pending output exceeds ", pulseConfigurationFrameLimit, " bytes")
+		return 0, E.New("EAP-TTLS pending output exceeds ", pulseConfigurationFrameLimit, " bytes")
 	}
 	c.sendBuffer = append(c.sendBuffer, content...)
 	return len(content), nil
@@ -262,7 +262,7 @@ func (c *pulseTTLSConn) SetWriteDeadline(deadline time.Time) error {
 func writePulseInnerEAP(w io.Writer, packet []byte) error {
 	attributeLength := 8 + len(packet)
 	if attributeLength > 0x00ffffff {
-		return E.New("Pulse inner EAP-Message AVP is too large: ", attributeLength)
+		return E.New("inner EAP-Message AVP is too large: ", attributeLength)
 	}
 	content := make([]byte, attributeLength)
 	binary.BigEndian.PutUint32(content[0:4], pulseAVPEAPMessage)

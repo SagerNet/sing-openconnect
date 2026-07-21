@@ -82,6 +82,7 @@ const (
 type m1OcservOptions struct {
 	authentication string
 	extra          string
+	logLevel       int
 	keepalive      int
 	dpd            int
 	rekey          int
@@ -534,6 +535,9 @@ func startM1OcservContainer(t *testing.T, ctx context.Context, options m1OcservO
 	if options.rekeyMethod == "" {
 		options.rekeyMethod = "new-tunnel"
 	}
+	if options.logLevel == 0 {
+		options.logLevel = 4
+	}
 	fixtureDirectory := t.TempDir()
 	err = os.Chmod(fixtureDirectory, 0o755)
 	if err != nil {
@@ -561,7 +565,7 @@ func startM1OcservContainer(t *testing.T, ctx context.Context, options m1OcservO
 		"--mount", "type=bind,source="+fixtureDirectory+",target=/fixture",
 		"--entrypoint", "ocserv",
 		ocservInteropImage,
-		"-f", "-d", "4", "-c", "/fixture/ocserv.conf",
+		"-f", "-d", strconv.Itoa(options.logLevel), "-c", "/fixture/ocserv.conf",
 	)
 	if err != nil {
 		t.Fatal(err)

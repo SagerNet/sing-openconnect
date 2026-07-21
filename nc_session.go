@@ -71,6 +71,13 @@ func (s *ncSession) Start() error {
 		s.terminate(err)
 		return err
 	}
+	acceptedAddress := configuration.configuration.RemoteAddress
+	if acceptedAddress.IsValid() {
+		s.snapshot.acceptedAddress = acceptedAddress
+		s.state.access.Lock()
+		s.state.acceptedAddress = acceptedAddress
+		s.state.access.Unlock()
+	}
 	s.access.Lock()
 	if s.closed {
 		s.access.Unlock()
@@ -110,7 +117,7 @@ func (s *ncSession) readLoop(connection *ncONCPConnection) {
 			packetBuffer.Release()
 		default:
 			packetBuffer.Release()
-			err = markTerminal(E.Extend(ErrProtocolNotSupported, "Network Connect oNCP received unknown KMP ", messageType))
+			err = markTerminal(E.Extend(ErrProtocolNotSupported, "oNCP received unknown KMP ", messageType))
 		}
 		if err != nil {
 			s.terminate(err)
@@ -257,7 +264,7 @@ func (s *ncSession) startInitialESP() *espChannel {
 		}
 		s.access.Unlock()
 		if s.client.options.Logger != nil {
-			s.client.options.Logger.WarnContext(s.ctx, "Network Connect ESP startup failed; using oNCP/TLS: ", err)
+			s.client.options.Logger.WarnContext(s.ctx, "ESP startup failed; using oNCP/TLS: ", err)
 		}
 		return nil
 	}
@@ -274,7 +281,7 @@ func (s *ncSession) startInitialESP() *espChannel {
 
 func (s *ncSession) enableESP(channel *espChannel) error {
 	if channel == nil || !channel.Ready() {
-		return E.New("Network Connect ESP channel was not established")
+		return E.New("ESP channel was not established")
 	}
 	s.espControlAccess.Lock()
 	defer s.espControlAccess.Unlock()
@@ -326,7 +333,7 @@ func (s *ncSession) fallbackFromESP(channel *espChannel, channelErr error) error
 	}
 	s.access.Unlock()
 	if channelErr != nil && s.client.options.Logger != nil {
-		s.client.options.Logger.WarnContext(s.ctx, "Network Connect ESP failed; using oNCP/TLS: ", channelErr)
+		s.client.options.Logger.WarnContext(s.ctx, "ESP failed; using oNCP/TLS: ", channelErr)
 	}
 	return nil
 }
@@ -358,15 +365,18 @@ func (s *ncSession) handleESPRekey(payload []byte) error {
 	parameters, err := parseNCONCPESPParameters(payload, parameters)
 	if err != nil {
 		if s.client.options.Logger != nil {
-			s.client.options.Logger.WarnContext(s.ctx, "Network Connect ESP rekey was unusable; using oNCP/TLS: ", err)
+			s.client.options.Logger.WarnContext(s.ctx, "ESP rekey was unusable; using oNCP/TLS: ", err)
 		}
 		_ = channel.Close()
 		return nil
 	}
+	if s.client.options.DPDInterval > 0 {
+		parameters.dpd = s.client.options.DPDInterval
+	}
 	defer parameters.clear()
 	if parameters.port != espConfiguration.port {
 		if s.client.options.Logger != nil {
-			s.client.options.Logger.WarnContext(s.ctx, "Network Connect ESP rekey changed the UDP port; using oNCP/TLS")
+			s.client.options.Logger.WarnContext(s.ctx, "ESP rekey changed the UDP port; using oNCP/TLS")
 		}
 		_ = channel.Close()
 		return nil
@@ -374,7 +384,7 @@ func (s *ncSession) handleESPRekey(payload []byte) error {
 	keyConfiguration, response, err := buildNCONCPESPKeyConfiguration(parameters)
 	if err != nil {
 		if s.client.options.Logger != nil {
-			s.client.options.Logger.WarnContext(s.ctx, "Network Connect ESP rekey keys were unusable; using oNCP/TLS: ", err)
+			s.client.options.Logger.WarnContext(s.ctx, "ESP rekey keys were unusable; using oNCP/TLS: ", err)
 		}
 		_ = channel.Close()
 		return nil
@@ -397,7 +407,7 @@ func (s *ncSession) handleESPRekey(payload []byte) error {
 	err = espConfiguration.keys.install(keyConfiguration)
 	if err != nil {
 		if s.client.options.Logger != nil {
-			s.client.options.Logger.WarnContext(s.ctx, "Network Connect ESP rekey installation failed; using oNCP/TLS: ", err)
+			s.client.options.Logger.WarnContext(s.ctx, "ESP rekey installation failed; using oNCP/TLS: ", err)
 		}
 		_ = channel.Close()
 		return nil
@@ -422,7 +432,7 @@ func (s *ncSession) handleESPRekey(payload []byte) error {
 
 func (s *ncSession) handleServerESPControl(payload []byte) error {
 	if len(payload) != 13 || binary.BigEndian.Uint16(payload[0:2]) != 6 || binary.BigEndian.Uint32(payload[2:6]) != 7 || binary.BigEndian.Uint16(payload[6:8]) != 1 || binary.BigEndian.Uint32(payload[8:12]) != 1 {
-		return markTerminal(E.New("Network Connect ESP KMP 303 control payload is invalid"))
+		return markTerminal(E.New("ESP KMP 303 control payload is invalid"))
 	}
 	if payload[12] != 0 {
 		return nil
@@ -463,13 +473,13 @@ func (s *ncSession) deliverTLSData(packetBuffer *buf.Buffer) error {
 		}
 		if packetLength > len(payload) {
 			packetBuffer.Release()
-			return markTerminal(E.New("Network Connect oNCP KMP 300 contains a truncated IPv4 packet"))
+			return markTerminal(E.New("oNCP KMP 300 contains a truncated IPv4 packet"))
 		}
 		if packetLength == packetBuffer.Len() {
-			s.client.pushIncomingDataPacket(packetBuffer)
+			s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
 			return nil
 		}
-		s.client.pushIncomingDataPacket(newPacketBufferFrom(payload[:packetLength]))
+		s.client.pushIncomingDataPacketContext(s.ctx, newPacketBufferFrom(payload[:packetLength]))
 		payload = payload[packetLength:]
 	}
 	packetBuffer.Release()
@@ -489,20 +499,20 @@ func (s *ncSession) deliverESPData(packetBuffer *buf.Buffer) {
 		}
 		return
 	}
-	s.client.pushIncomingDataPacket(packetBuffer)
+	s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
 }
 
 func validateNCONCPIPv4Packet(payload []byte, exact bool) (int, error) {
 	if len(payload) < 20 || payload[0]>>4 != 4 {
-		return 0, E.Extend(ErrProtocolNotSupported, "Network Connect oNCP supports IPv4 packets only")
+		return 0, E.Extend(ErrProtocolNotSupported, "oNCP supports IPv4 packets only")
 	}
 	headerLength := int(payload[0]&0x0f) * 4
 	packetLength := int(binary.BigEndian.Uint16(payload[2:4]))
 	if headerLength < 20 || packetLength < headerLength || packetLength > len(payload) {
-		return 0, E.New("Network Connect oNCP IPv4 packet length is invalid")
+		return 0, E.New("oNCP IPv4 packet length is invalid")
 	}
 	if exact && packetLength != len(payload) {
-		return 0, E.New("Network Connect ESP IPv4 packet has trailing bytes")
+		return 0, E.New("ESP IPv4 packet has trailing bytes")
 	}
 	return packetLength, nil
 }
@@ -557,7 +567,7 @@ func (s *ncSession) WriteDataPacketBuffers(packetBuffers []*buf.Buffer) error {
 		}
 		if packetLength > int(configuration.configuration.MTU) {
 			validPacketBuffers = packetBuffers[:index]
-			validationErr = E.New("Network Connect oNCP IPv4 packet exceeds negotiated MTU: ", packetLength)
+			validationErr = E.New("oNCP IPv4 packet exceeds negotiated MTU: ", packetLength)
 			break
 		}
 	}
@@ -582,7 +592,7 @@ func (s *ncSession) WriteDataPacketBuffers(packetBuffers []*buf.Buffer) error {
 
 func (s *ncSession) Fail(err error) {
 	if err == nil {
-		err = E.New("Network Connect oNCP session failed")
+		err = E.New("oNCP session failed")
 	}
 	s.terminate(err)
 }

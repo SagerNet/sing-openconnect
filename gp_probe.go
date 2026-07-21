@@ -33,7 +33,7 @@ func (p gpProbe) build(sequence uint16) ([]byte, error) {
 	assigned := p.assigned.Unmap()
 	magic := p.magic.Unmap()
 	if !assigned.IsValid() || !magic.IsValid() || assigned.Is6() != magic.Is6() {
-		return nil, E.New("GlobalProtect ESP probe requires matching assigned and magic addresses")
+		return nil, E.New("ESP probe requires matching assigned and magic addresses")
 	}
 	if assigned.Is6() {
 		return p.buildIPv6(sequence, assigned, magic), nil

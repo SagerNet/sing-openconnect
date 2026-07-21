@@ -302,7 +302,13 @@ func TestM1AnyConnectProductionDTLSInterop(t *testing.T) {
 		t.Parallel()
 		peerAccess.Lock()
 		defer peerAccess.Unlock()
-		runProductionAnyConnectDeprecatedDTLSRejected(t, ctx, legacyContainer)
+		runProductionAnyConnectDeprecatedDTLSRejected(t, ctx, legacyContainer, "DES-CBC3-SHA")
+	})
+	t.Run("owned-cisco-dtls09-des-disabled-terminal", func(t *testing.T) {
+		t.Parallel()
+		peerAccess.Lock()
+		defer peerAccess.Unlock()
+		runProductionAnyConnectDeprecatedDTLSRejected(t, ctx, legacyContainer, "DES-CBC-SHA")
 	})
 	t.Run("owned-cisco-dtls09-3des-opt-in", func(t *testing.T) {
 		t.Parallel()
@@ -317,21 +323,24 @@ func TestM1AnyConnectProductionDTLSInterop(t *testing.T) {
 	})
 }
 
-func runProductionAnyConnectDeprecatedDTLSRejected(t *testing.T, ctx context.Context, container ocservContainer) {
+func runProductionAnyConnectDeprecatedDTLSRejected(t *testing.T, ctx context.Context, container ocservContainer, cipherSuite string) {
 	t.Helper()
 	observer := new(productionDTLSObserver)
 	dialer := &productionInteropDialer{
-		observer:       observer,
-		udpDestination: M.ParseSocksaddr(container.udpAddress),
-		rewriteHeaders: []string{"X-DTLS-CipherSuite: DES-CBC3-SHA"},
-		proxyErrors:    make(chan error, 8),
+		observer:               observer,
+		udpDestination:         M.ParseSocksaddr(container.udpAddress),
+		rewriteHeaders:         []string{"X-DTLS-CipherSuite: " + cipherSuite},
+		rewriteResponseHeaders: []string{"X-DTLS-CipherSuite: " + cipherSuite},
+		removeResponseHeaders:  []string{"X-DTLS-Session-ID"},
+		appendResponseHeaders:  []string{"X-DTLS-Session-ID: " + strings.Repeat("01", 32)},
+		proxyErrors:            make(chan error, 8),
 	}
 	certificate, err := tls.LoadX509KeyPair(
 		filepath.Join("testdata", "ocserv", "server-cert.pem"),
 		filepath.Join("testdata", "ocserv", "server-key.pem"),
 	)
 	if err != nil {
-		t.Fatal(E.Cause(err, "load TLS observer certificate for rejected 3DES"))
+		t.Fatal(E.Cause(err, "load TLS observer certificate for rejected ", cipherSuite))
 	}
 	dialer.certificate = certificate
 	client, err := openconnect.NewClient(openconnect.ClientOptions{
@@ -346,12 +355,12 @@ func runProductionAnyConnectDeprecatedDTLSRejected(t *testing.T, ctx context.Con
 		Dialer: dialer,
 	})
 	if err != nil {
-		t.Fatal(E.Cause(err, "create production AnyConnect client for rejected 3DES"))
+		t.Fatal(E.Cause(err, "create production AnyConnect client for rejected ", cipherSuite))
 	}
 	defer client.Close()
 	err = client.Start()
 	if err != nil {
-		t.Fatal(E.Cause(err, "start production AnyConnect client for rejected 3DES"))
+		t.Fatal(E.Cause(err, "start production AnyConnect client for rejected ", cipherSuite))
 	}
 	terminalContext, cancelTerminal := context.WithTimeout(ctx, 10*time.Second)
 	defer cancelTerminal()
@@ -361,14 +370,15 @@ func runProductionAnyConnectDeprecatedDTLSRejected(t *testing.T, ctx context.Con
 		_, err = client.ReadDataPacket(terminalContext)
 	}
 	if !E.IsMulti(err, openconnect.ErrDeprecatedCryptoDisabled) {
-		t.Fatalf("3DES without AllowInsecureCrypto was not terminal ErrDeprecatedCryptoDisabled: %v", err)
+		t.Fatalf("%s without AllowInsecureCrypto was not terminal ErrDeprecatedCryptoDisabled: %v", cipherSuite, err)
 	}
 	if client.Ready() {
-		t.Fatal("3DES without AllowInsecureCrypto established a ready tunnel")
+		t.Fatal(cipherSuite, " without AllowInsecureCrypto established a ready tunnel")
 	}
 	if observer.writtenPackets.Load() != 0 || observer.readPackets.Load() != 0 {
 		t.Fatalf(
-			"3DES without AllowInsecureCrypto exchanged UDP data: writes=%d reads=%d",
+			"%s without AllowInsecureCrypto exchanged UDP data: writes=%d reads=%d",
+			cipherSuite,
 			observer.writtenPackets.Load(),
 			observer.readPackets.Load(),
 		)
@@ -378,7 +388,8 @@ func runProductionAnyConnectDeprecatedDTLSRejected(t *testing.T, ctx context.Con
 	time.Sleep(1200 * time.Millisecond)
 	if observer.udpDialAttempts.Load() != udpDials || dialer.cstpConnects.Load() != cstpConnects {
 		t.Fatalf(
-			"terminal rejected 3DES retried: UDP %d->%d CSTP %d->%d",
+			"terminal rejected %s retried: UDP %d->%d CSTP %d->%d",
+			cipherSuite,
 			udpDials,
 			observer.udpDialAttempts.Load(),
 			cstpConnects,

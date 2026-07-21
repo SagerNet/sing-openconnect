@@ -33,6 +33,7 @@ DTLS = os.environ.get("DTLS", "0") == "1"
 DTLS_DELAY = float(os.environ.get("DTLS_DELAY", "0"))
 SPLIT_STREAM = os.environ.get("SPLIT_STREAM", "1") == "1"
 FAIL_FIRST_TLS = os.environ.get("FAIL_FIRST_TLS", "0") == "1"
+DROP_SECOND_TLS = os.environ.get("DROP_SECOND_TLS", "0") == "1"
 FAIL_FIRST_DTLS = os.environ.get("FAIL_FIRST_DTLS", "0") == "1"
 REJECT_FIRST_TLS = os.environ.get("REJECT_FIRST_TLS", "0") == "1"
 MALFORMED_DTLS = os.environ.get("MALFORMED_DTLS", "0") == "1"
@@ -771,6 +772,10 @@ def handle_tls_connection(connection):
                 time.sleep(0.02)
                 connection.sendall(b"TP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
                 log("FORTINET_PEER_TLS_SESSION_REJECTED")
+                return
+            if DROP_SECOND_TLS and index == 2:
+                log("FORTINET_PEER_SECOND_TLS_DROPPED")
+                connection.sendall(encode_fortinet_frame(b"\xff\x03\xc0\x21\x05\x7f\x00\x04"))
                 return
             log("FORTINET_PEER_TLS_TUNNEL_{}".format(index))
             bridge_ppp(TLSTransport(connection, buffered), "tls", index)

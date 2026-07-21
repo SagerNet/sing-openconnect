@@ -40,6 +40,7 @@ type m4PulseESPScenario struct {
 	replayProtection bool
 	rekey            bool
 	invalidLZO       bool
+	dpdInterval      time.Duration
 }
 
 type m4PulseESPControlKind uint8
@@ -142,7 +143,7 @@ func TestM4PulseIndependentESPLifecycle(t *testing.T) {
 	oracleBinary := buildM4PulseESPOracle(t, buildContext)
 	cancelBuild()
 	testCases := []m4PulseESPScenario{
-		{name: "ipv4-retry-lzo-rekey-fatal", replayProtection: true, rekey: true, invalidLZO: true},
+		{name: "ipv4-retry-lzo-rekey-fatal", replayProtection: true, rekey: true, invalidLZO: true, dpdInterval: 10 * time.Second},
 		{name: "ipv6-same-family-replay-disabled-close", endpointIPv6: true},
 		{name: "cross-family-close", crossFamily: true, replayProtection: true},
 	}
@@ -178,12 +179,13 @@ func runM4PulseESPScenario(
 		udpPort:    relay.port,
 	}
 	client, err := openconnect.NewClient(openconnect.ClientOptions{
-		Context:    caseContext,
-		Server:     net.JoinHostPort(m4PulseHostname, strconv.Itoa(int(peer.port))),
-		Flavor:     openconnect.FlavorPulse,
-		Username:   m4PulseUsername,
-		Password:   m4PulsePassword,
-		ReportedOS: "linux-64",
+		Context:     caseContext,
+		Server:      net.JoinHostPort(m4PulseHostname, strconv.Itoa(int(peer.port))),
+		Flavor:      openconnect.FlavorPulse,
+		Username:    m4PulseUsername,
+		Password:    m4PulsePassword,
+		ReportedOS:  "linux-64",
+		DPDInterval: scenario.dpdInterval,
 		TLSConfig: openconnect.ClientTLSOptions{Config: &tls.Config{
 			RootCAs:    roots,
 			MinVersion: tls.VersionTLS12,
@@ -404,7 +406,7 @@ func runM4PulseESPScenario(
 	terminalContext, cancelTerminal := context.WithTimeout(caseContext, 5*time.Second)
 	_, terminalErr := client.ReadDataPacket(terminalContext)
 	cancelTerminal()
-	if terminalErr == nil || !strings.Contains(terminalErr.Error(), "Pulse fatal error 7") {
+	if terminalErr == nil || !strings.Contains(terminalErr.Error(), "fatal error 7") {
 		t.Fatal("Pulse type-0x93 frame did not terminate the session: ", terminalErr)
 	}
 	peer.Wait(t, caseContext)

@@ -66,7 +66,7 @@ func connectCertificateDTLS(ctx context.Context, negotiation certificateDTLSNego
 		return nil, E.New("certificate DTLS server did not provide a UDP address")
 	}
 	if negotiation.LegacyVersion && !negotiation.AllowLegacyCrypto {
-		return nil, E.Extend(ErrDeprecatedCryptoDisabled, "F5 DTLS 1.0")
+		return nil, E.Extend(ErrDeprecatedCryptoDisabled, "DTLS 1.0")
 	}
 	dialer := negotiation.Dialer
 	if dialer == nil {

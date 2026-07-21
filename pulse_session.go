@@ -124,7 +124,7 @@ func (s *pulseSession) reconnectWithCookie() (*pulseIFTConnection, error) {
 	result, loaded := obtained.(*pulseSessionState)
 	if !loaded || result == nil {
 		_ = authentication.Close()
-		return nil, E.Extend(ErrProtocolNotSupported, "Pulse cookie reconnect returned an invalid session")
+		return nil, E.Extend(ErrProtocolNotSupported, "cookie reconnect returned an invalid session")
 	}
 	connection, err := s.state.installReconnect(result, s)
 	if err != nil {
@@ -177,7 +177,7 @@ func (s *pulseSession) readLoop(connection *pulseIFTConnection) {
 				}
 				continue
 			}
-			s.client.pushIncomingDataPacket(frame.packetBuffer)
+			s.client.pushIncomingDataPacketContext(s.ctx, frame.packetBuffer)
 		case 1:
 			if !pulseESPConfigurationFrameValid(frame.packetBuffer.Bytes()) {
 				frame.packetBuffer.Release()
@@ -191,7 +191,7 @@ func (s *pulseSession) readLoop(connection *pulseIFTConnection) {
 			if err != nil {
 				s.suppressESP()
 				if s.client.options.Logger != nil {
-					s.client.options.Logger.WarnContext(s.ctx, "Pulse ESP rekey failed; continuing over IF-T/TLS: ", err)
+					s.client.options.Logger.WarnContext(s.ctx, "ESP rekey failed; continuing over IF-T/TLS: ", err)
 				}
 			}
 		case 0x93:
@@ -235,7 +235,7 @@ func (s *pulseSession) handleESPRekey(payload []byte) error {
 	}
 	s.access.RUnlock()
 	if previousESPConfiguration == nil {
-		return E.New("Pulse server requested ESP rekey without an active ESP configuration")
+		return E.New("server requested ESP rekey without an active ESP configuration")
 	}
 	snapshot := s.state.snapshot()
 	acceptedAddress := snapshot.acceptedAddress
@@ -282,11 +282,11 @@ func (s *pulseSession) handleESPRekey(payload []byte) error {
 func parsePulseFatalError(payload []byte) error {
 	message := strings.TrimSuffix(string(payload), "\n")
 	if !strings.HasPrefix(message, "errorType=") {
-		return markTerminal(E.New("Pulse server sent a malformed fatal error"))
+		return markTerminal(E.New("server sent a malformed fatal error"))
 	}
 	reasonContent, encodedMessage, found := strings.Cut(message, " errorString=")
 	if !found {
-		return markTerminal(E.New("Pulse server sent a malformed fatal error"))
+		return markTerminal(E.New("server sent a malformed fatal error"))
 	}
 	reasonText := strings.TrimPrefix(reasonContent, "errorType=")
 	reason, err := strconv.ParseUint(reasonText, 10, 32)
@@ -297,7 +297,7 @@ func parsePulseFatalError(payload []byte) error {
 	if err != nil {
 		decodedMessage = encodedMessage
 	}
-	return markTerminal(E.New("Pulse fatal error ", reason, ": ", decodedMessage))
+	return markTerminal(E.New("fatal error ", reason, ": ", decodedMessage))
 }
 
 func (s *pulseSession) Done() <-chan error {
@@ -357,11 +357,11 @@ func (s *pulseSession) WriteDataPacketBuffers(packetBuffers []*buf.Buffer) error
 		espAllowsVersion := version == 4 && espAllowsIPv4 || version == 6 && espAllowsIPv6
 		var validationErr error
 		if packetBuffer.IsEmpty() || packetBuffer.Len() > mtu {
-			validationErr = E.New("Pulse data packet has invalid length: ", packetBuffer.Len())
+			validationErr = E.New("data packet has invalid length: ", packetBuffer.Len())
 		} else if version != 4 && version != 6 {
-			validationErr = E.New("Pulse data packet has unknown IP version")
+			validationErr = E.New("data packet has unknown IP version")
 		} else if !configurationAllowsVersion {
-			validationErr = E.New("Pulse data packet uses an unassigned IP family")
+			validationErr = E.New("data packet uses an unassigned IP family")
 		}
 		if validationErr != nil {
 			err := flushPending()
@@ -384,7 +384,7 @@ func (s *pulseSession) WriteDataPacketBuffers(packetBuffers []*buf.Buffer) error
 			packetBuffers[index].Release()
 			packetBuffers[index] = fallbackPacketBuffer
 			if s.client.options.Logger != nil {
-				s.client.options.Logger.WarnContext(s.ctx, "Pulse ESP write failed; retrying over IF-T/TLS: ", err)
+				s.client.options.Logger.WarnContext(s.ctx, "ESP write failed; retrying over IF-T/TLS: ", err)
 			}
 			s.client.setActiveTransport(s, TransportIFT)
 		}
@@ -396,7 +396,7 @@ func (s *pulseSession) WriteDataPacketBuffers(packetBuffers []*buf.Buffer) error
 
 func (s *pulseSession) Fail(err error) {
 	if err == nil {
-		err = E.New("Pulse session failed")
+		err = E.New("session failed")
 	}
 	s.terminate(err)
 }
@@ -525,6 +525,10 @@ func (s *pulseSession) startESP() {
 	}
 	espConfiguration := s.configuration.esp
 	retryInterval := espConfiguration.fallback
+	dpdInterval := espConfiguration.fallback
+	if s.client.options.DPDInterval > 0 {
+		dpdInterval = s.client.options.DPDInterval
+	}
 	keys := s.espKeys
 	if keys == nil {
 		var err error
@@ -546,7 +550,7 @@ func (s *pulseSession) startESP() {
 		Remote:                espConfiguration.remote,
 		Keys:                  keys,
 		MTU:                   int(s.configuration.configuration.MTU),
-		DPD:                   retryInterval,
+		DPD:                   dpdInterval,
 		Logger:                s.client.options.Logger,
 		BuildProbe:            probe.build,
 		IsProbeResponse:       probe.matches,
@@ -606,7 +610,7 @@ func (s *pulseSession) monitorESP(
 			case channelErr, open := <-channel.Done():
 				probeTimer.Stop()
 				if !open {
-					channelErr = E.New("Pulse ESP channel closed before establishment")
+					channelErr = E.New("ESP channel closed before establishment")
 				}
 				s.finishESPAttempt(channel, generation, retryInterval, channelErr)
 				return
@@ -625,7 +629,7 @@ func (s *pulseSession) monitorESP(
 		case channelErr, open := <-channel.Done():
 			retryTimer.Stop()
 			if !open {
-				channelErr = E.New("Pulse ESP channel closed before establishment")
+				channelErr = E.New("ESP channel closed before establishment")
 			}
 			s.finishESPAttempt(channel, generation, retryInterval, channelErr)
 			return
@@ -643,14 +647,14 @@ func (s *pulseSession) monitorEstablishedESP(channel *espChannel, generation uin
 	s.client.setActiveTransport(s, TransportESP)
 	s.access.RUnlock()
 	if s.client.options.Logger != nil {
-		s.client.options.Logger.InfoContext(s.ctx, "Pulse ESP channel established")
+		s.client.options.Logger.InfoContext(s.ctx, "ESP channel established")
 	}
 	select {
 	case <-s.ctx.Done():
 		return
 	case channelErr, open := <-channel.Done():
 		if !open {
-			channelErr = E.New("Pulse ESP channel closed unexpectedly")
+			channelErr = E.New("ESP channel closed unexpectedly")
 		}
 		s.finishESPAttempt(channel, generation, retryInterval, channelErr)
 	}
@@ -673,7 +677,7 @@ func (s *pulseSession) finishESPAttempt(
 	s.client.setActiveTransport(s, TransportIFT)
 	_ = channel.Close()
 	if err != nil && s.client.options.Logger != nil {
-		s.client.options.Logger.WarnContext(s.ctx, "Pulse ESP stopped; using IF-T/TLS until retry: ", err)
+		s.client.options.Logger.WarnContext(s.ctx, "ESP stopped; using IF-T/TLS until retry: ", err)
 	}
 	retryTimer := time.NewTimer(retryInterval)
 	select {
@@ -708,7 +712,7 @@ func (s *pulseSession) triggerESPProbe() {
 	}
 	err := channel.SendProbe()
 	if err != nil && s.client.options.Logger != nil {
-		s.client.options.Logger.DebugContext(s.ctx, "Pulse ESP re-probe failed: ", err)
+		s.client.options.Logger.DebugContext(s.ctx, "ESP re-probe failed: ", err)
 	}
 }
 
@@ -756,7 +760,7 @@ func (s *pulseSession) deliverESP(generation uint64, packetBuffer *buf.Buffer) {
 		}
 		return
 	}
-	s.client.pushIncomingDataPacket(packetBuffer)
+	s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
 }
 
 func pulseESPAllowsIPVersion(configuration *pulseESPConfiguration, version byte) bool {

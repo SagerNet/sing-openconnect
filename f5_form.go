@@ -60,7 +60,7 @@ func parseF5AuthenticationDocument(content []byte) (*f5AuthenticationForm, []str
 func parseF5HTMLForm(node *html.Node) (*f5AuthenticationForm, error) {
 	method, _ := htmlAttribute(node, "method")
 	if !strings.EqualFold(strings.TrimSpace(method), "post") {
-		return nil, E.New("F5 authentication form method is not POST")
+		return nil, E.New("authentication form method is not POST")
 	}
 	formID, _ := htmlAttribute(node, "id")
 	action, _ := htmlAttribute(node, "action")
@@ -141,7 +141,7 @@ func parseF5HTMLInput(formID string, index int, node *html.Node) (f5Authenticati
 	name, _ := htmlAttribute(node, "name")
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return f5AuthenticationField{}, false, E.New("F5 authentication input has no name")
+		return f5AuthenticationField{}, false, E.New("authentication input has no name")
 	}
 	value, _ := htmlAttribute(node, "value")
 	return f5AuthenticationField{
@@ -157,7 +157,7 @@ func parseF5HTMLSelect(formID string, index int, node *html.Node) (f5Authenticat
 	name, _ := htmlAttribute(node, "name")
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return f5AuthenticationField{}, E.New("F5 authentication select has no name")
+		return f5AuthenticationField{}, E.New("authentication select has no name")
 	}
 	field := f5AuthenticationField{
 		submissionKey: f5SubmissionKey(formID, index),
@@ -183,7 +183,7 @@ func parseF5HTMLSelect(formID string, index int, node *html.Node) (f5Authenticat
 		}
 	}
 	if len(field.options) == 0 {
-		return f5AuthenticationField{}, E.New("F5 authentication select has no choices: ", name)
+		return f5AuthenticationField{}, E.New("authentication select has no choices: ", name)
 	}
 	return field, nil
 }
@@ -223,7 +223,7 @@ func parseF5JSONForm(document *html.Node) (*f5AuthenticationForm, []string, erro
 		return nil, nil, nil
 	}
 	if len(encodedForms) != 1 {
-		return nil, nil, E.New("F5 authentication document contains multiple appLoader.configure objects")
+		return nil, nil, E.New("authentication document contains multiple appLoader.configure objects")
 	}
 	form, warnings, parseErr := decodeF5JSONForm(encodedForms[0])
 	if parseErr != nil {
@@ -239,21 +239,21 @@ func extractF5AppLoaderObject(script string) ([]byte, bool, error) {
 		return nil, false, nil
 	}
 	if strings.Contains(script[markerIndex+len(marker):], marker) {
-		return nil, false, E.New("F5 authentication script contains multiple appLoader.configure calls")
+		return nil, false, E.New("authentication script contains multiple appLoader.configure calls")
 	}
 	position := markerIndex + len(marker)
 	for position < len(script) && isF5JavaScriptSpace(script[position]) {
 		position++
 	}
 	if position >= len(script) || script[position] != '(' {
-		return nil, false, E.New("F5 appLoader.configure call has no opening parenthesis")
+		return nil, false, E.New("appLoader.configure call has no opening parenthesis")
 	}
 	position++
 	for position < len(script) && isF5JavaScriptSpace(script[position]) {
 		position++
 	}
 	if position >= len(script) || script[position] != '{' {
-		return nil, false, E.New("F5 appLoader.configure call does not start with a JSON object")
+		return nil, false, E.New("appLoader.configure call does not start with a JSON object")
 	}
 	start := position
 	depth := 0
@@ -289,34 +289,34 @@ func extractF5AppLoaderObject(script string) ([]byte, bool, error) {
 					position++
 				}
 				if position >= len(script) || script[position] != ')' {
-					return nil, false, E.New("F5 appLoader.configure JSON object has trailing arguments")
+					return nil, false, E.New("appLoader.configure JSON object has trailing arguments")
 				}
 				return encoded, true, nil
 			}
 			if depth < 0 {
-				return nil, false, E.New("F5 appLoader.configure JSON object is unbalanced")
+				return nil, false, E.New("appLoader.configure JSON object is unbalanced")
 			}
 		}
 	}
-	return nil, false, E.New("F5 appLoader.configure JSON object is incomplete")
+	return nil, false, E.New("appLoader.configure JSON object is incomplete")
 }
 
 func decodeF5JSONForm(content []byte) (*f5AuthenticationForm, []string, error) {
-	root, decodeErr := decodeF5JSONObject(content, "F5 appLoader.configure")
+	root, decodeErr := decodeF5JSONObject(content, "appLoader.configure")
 	if decodeErr != nil {
 		return nil, nil, decodeErr
 	}
 	logonContent, loaded := root["logon"]
 	if !loaded {
-		return nil, nil, E.New("F5 appLoader.configure object has no logon object")
+		return nil, nil, E.New("appLoader.configure object has no logon object")
 	}
-	logon, decodeErr := decodeF5JSONObject(logonContent, "F5 appLoader.configure logon")
+	logon, decodeErr := decodeF5JSONObject(logonContent, "appLoader.configure logon")
 	if decodeErr != nil {
 		return nil, nil, decodeErr
 	}
 	formContent, loaded := logon["form"]
 	if !loaded {
-		return nil, nil, E.New("F5 appLoader.configure logon has no form object")
+		return nil, nil, E.New("appLoader.configure logon has no form object")
 	}
 	var encoded f5JSONForm
 	decodeErr = json.Unmarshal(formContent, &encoded)
@@ -332,7 +332,7 @@ func decodeF5JSONForm(content []byte) (*f5AuthenticationForm, []string, error) {
 		return nil, nil, decodeErr
 	}
 	if len(encoded.Fields) == 0 {
-		return nil, nil, E.New("F5 appLoader.configure form has no fields array")
+		return nil, nil, E.New("appLoader.configure form has no fields array")
 	}
 	var encodedFields []json.RawMessage
 	decodeErr = json.Unmarshal(encoded.Fields, &encodedFields)
@@ -420,7 +420,7 @@ func requiredF5JSONString(content json.RawMessage, description string) (string, 
 		return "", decodeErr
 	}
 	if value == "" {
-		return "", E.New("F5 appLoader.configure ", description, " is empty")
+		return "", E.New("appLoader.configure ", description, " is empty")
 	}
 	return value, nil
 }

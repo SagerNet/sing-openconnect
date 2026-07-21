@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sagernet/sing/common/buf"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -64,7 +65,7 @@ func (f *fortinetFrontend) ConnectTunnel(ctx context.Context, obtained obtainedS
 		return nil, E.Extend(ErrProtocolNotSupported, "invalid Fortinet obtained session")
 	}
 	snapshot := state.snapshot()
-	if state.frontend != f || snapshot.serverURL == nil || !snapshot.acceptedAddress.IsValid() || snapshot.jar == nil || snapshot.svpnCookie == "" {
+	if state.frontend != f || snapshot.serverURL == nil || snapshot.jar == nil || snapshot.svpnCookie == "" {
 		return nil, ErrSessionRejected
 	}
 	sessionContext, cancelSession := context.WithCancel(ctx)
@@ -91,7 +92,7 @@ func (s *fortinetSession) preparePPP() (pppSessionSetup, error) {
 		return pppSessionSetup{}, configurationErr
 	}
 	if configuration.platform != "" && s.client.options.Logger != nil {
-		s.client.options.Logger.InfoContext(s.ctx, "Fortinet gateway reports ", configuration.platform)
+		s.client.options.Logger.InfoContext(s.ctx, "gateway reports ", configuration.platform)
 	}
 	s.snapshot = s.state.snapshot()
 	reconnectErr := validateFortinetReconnect(configuration, s.snapshot, time.Now())
@@ -124,14 +125,16 @@ func (s *fortinetSession) preparePPP() (pppSessionSetup, error) {
 			},
 			Encapsulation:          pppEncapsulationFortinet,
 			WantIPv4:               configuration.wantIPv4,
-			WantIPv6:               configuration.wantIPv6,
+			WantIPv6:               configuration.wantIPv6 && !s.client.options.IPv6Disabled,
 			IPv4Address:            proposedIPv4,
 			IPv6Address:            proposedIPv6,
 			LockAddresses:          s.snapshot.hasPreviousAddresses,
 			MTU:                    carrier.mtu,
 			RequestIPv4NameServers: requestNameServers,
 			EchoInterval:           configuration.echoInterval,
-			Deliver:                s.client.pushIncomingDataPacket,
+			Deliver: func(packetBuffer *buf.Buffer) {
+				s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
+			},
 		},
 		configuration:   configuration.configuration,
 		usingDTLS:       usingDTLS,
@@ -193,7 +196,7 @@ func (s *fortinetSession) connectPPPTLS() (pppSessionCarrier, error) {
 		return pppSessionCarrier{}, E.Cause(deadlineErr, "set Fortinet TLS connection deadline")
 	}
 	tlsConfiguration := s.client.tlsConfig.Clone()
-	if s.client.options.TLSConfig.Config == nil || s.client.options.TLSConfig.Config.ServerName == "" {
+	if tlsConfiguration.ServerName == "" {
 		tlsConfiguration.ServerName = s.snapshot.serverURL.Hostname()
 	}
 	tlsConfiguration.NextProtos = []string{"http/1.1"}
@@ -212,7 +215,7 @@ func (s *fortinetSession) connectPPPTLS() (pppSessionCarrier, error) {
 	}
 	localSourceIP := parseFortinetRemoteAddress(tlsConnection.LocalAddr())
 	if !localSourceIP.IsValid() {
-		return pppSessionCarrier{}, E.New("Fortinet TLS transport has no local source IP")
+		return pppSessionCarrier{}, E.New("TLS transport has no local source IP")
 	}
 	setupComplete = true
 	return pppSessionCarrier{
@@ -232,7 +235,7 @@ func (s *fortinetSession) connectPPPDTLS(ctx context.Context) (pppSessionCarrier
 		return pppSessionCarrier{}, portErr
 	}
 	tlsConfiguration := s.client.tlsConfig.Clone()
-	if s.client.options.TLSConfig.Config == nil || s.client.options.TLSConfig.Config.ServerName == "" {
+	if tlsConfiguration.ServerName == "" {
 		tlsConfiguration.ServerName = s.snapshot.serverURL.Hostname()
 	}
 	connection, connectErr := connectCertificateDTLS(ctx, certificateDTLSNegotiation{
@@ -252,7 +255,7 @@ func (s *fortinetSession) connectPPPDTLS(ctx context.Context) (pppSessionCarrier
 		}
 	}()
 	if connection.DataMTU() > 0 && len(configuration.dtlsConnectRequest) > connection.DataMTU() {
-		return pppSessionCarrier{}, E.New("Fortinet DTLS client hello exceeds negotiated datagram MTU")
+		return pppSessionCarrier{}, E.New("DTLS client hello exceeds negotiated datagram MTU")
 	}
 	applicationConnection, probeErr := probeFortinetDTLS(ctx, connection, configuration.dtlsConnectRequest)
 	if probeErr != nil {
@@ -260,12 +263,12 @@ func (s *fortinetSession) connectPPPDTLS(ctx context.Context) (pppSessionCarrier
 	}
 	dataMTU := connection.DataMTU() - 10
 	if dataMTU < pppMinimumMRU {
-		return pppSessionCarrier{}, E.New("Fortinet DTLS data MTU is too small for PPP")
+		return pppSessionCarrier{}, E.New("DTLS data MTU is too small for PPP")
 	}
 	tunnelMTU := min(int(configuration.configuration.MTU), dataMTU)
 	localSourceIP := parseFortinetRemoteAddress(connection.LocalAddr())
 	if !localSourceIP.IsValid() {
-		return pppSessionCarrier{}, E.New("Fortinet DTLS transport has no local source IP")
+		return pppSessionCarrier{}, E.New("DTLS transport has no local source IP")
 	}
 	setupComplete = true
 	return pppSessionCarrier{
@@ -466,7 +469,7 @@ func (c *fortinetTLSConn) Read(content []byte) (int, error) {
 				c.publishClassification(ErrSessionRejected)
 				return 0, ErrSessionRejected
 			}
-			classificationErr := markTerminal(E.New("Fortinet response-less TLS switch unexpectedly returned HTTP status ", statusCode))
+			classificationErr := markTerminal(E.New("response-less TLS switch unexpectedly returned HTTP status ", statusCode))
 			c.publishClassification(classificationErr)
 			return 0, classificationErr
 		}
@@ -495,7 +498,7 @@ func readFortinetHTTPStatus(reader *bufio.Reader) (int, error) {
 	for {
 		remaining := fortinetMaximumHeaderSize - headerBytes
 		if remaining <= 0 {
-			return 0, E.New("Fortinet HTTP headers exceed ", fortinetMaximumHeaderSize, " bytes")
+			return 0, E.New("HTTP headers exceed ", fortinetMaximumHeaderSize, " bytes")
 		}
 		line, lineErr := readFortinetHTTPLine(reader, remaining)
 		if lineErr != nil {
@@ -503,7 +506,7 @@ func readFortinetHTTPStatus(reader *bufio.Reader) (int, error) {
 		}
 		headerBytes += len(line) + 2
 		if headerBytes > fortinetMaximumHeaderSize {
-			return 0, E.New("Fortinet HTTP headers exceed ", fortinetMaximumHeaderSize, " bytes")
+			return 0, E.New("HTTP headers exceed ", fortinetMaximumHeaderSize, " bytes")
 		}
 		if line == "" {
 			return statusCode, nil
@@ -522,7 +525,7 @@ func readFortinetHTTPLine(reader *bufio.Reader, maximum int) (string, error) {
 			return "", readErr
 		}
 		if len(content)+len(fragment) > maximum {
-			return "", E.New("Fortinet HTTP line exceeds ", maximum, " bytes")
+			return "", E.New("HTTP line exceeds ", maximum, " bytes")
 		}
 		content = append(content, fragment...)
 		if !continued {

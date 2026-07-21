@@ -78,6 +78,13 @@ func (s *gpSession) Start() error {
 		s.terminate(err)
 		return err
 	}
+	authenticatedAddress := configuration.Configuration.RemoteAddress
+	if authenticatedAddress.IsValid() {
+		s.snapshot.authenticatedAddress = authenticatedAddress
+		s.state.access.Lock()
+		s.state.authenticatedAddress = authenticatedAddress
+		s.state.access.Unlock()
+	}
 	s.access.Lock()
 	if s.closed {
 		s.access.Unlock()
@@ -97,6 +104,10 @@ func (s *gpSession) Start() error {
 	s.state.access.Unlock()
 	s.state.frontend.previousIPv4 = configuration.AssignedIPv4
 	s.state.frontend.previousIPv6 = configuration.AssignedIPv6
+	hipReportInterval := s.snapshot.hipReportInterval
+	if s.client.options.TrojanInterval > 0 {
+		hipReportInterval = s.client.options.TrojanInterval
+	}
 	hipRunner, err := newGPHIPRunner(
 		s.client,
 		s.snapshot.serverURL,
@@ -106,7 +117,7 @@ func (s *gpSession) Start() error {
 		configuration.AssignedIPv6,
 		s.snapshot.clientVersion,
 		reportedGPOS(s.client),
-		s.snapshot.hipReportInterval,
+		hipReportInterval,
 	)
 	if err != nil {
 		s.terminate(err)
@@ -133,7 +144,7 @@ func (s *gpSession) Start() error {
 			return s.finishStartup()
 		}
 		if s.client.options.Logger != nil {
-			s.client.options.Logger.WarnContext(s.ctx, "GlobalProtect ESP did not establish; using GPST: ", err)
+			s.client.options.Logger.WarnContext(s.ctx, "ESP did not establish; using GPST: ", err)
 		}
 	}
 	err = s.openGPST()
@@ -164,15 +175,17 @@ func (s *gpSession) startInitialESP(configuration *gpTunnelConfiguration) error 
 	}
 	probe := gpProbe{assigned: assigned, magic: espConfiguration.Magic}
 	channelConfig := espChannelConfig{
-		Dialer:                       s.client.options.Dialer,
-		Remote:                       espConfiguration.Remote,
-		Keys:                         espConfiguration.Keys,
-		MTU:                          int(configuration.Configuration.MTU),
-		DPD:                          configuration.DPD,
-		Logger:                       s.client.options.Logger,
-		BuildProbe:                   probe.build,
-		IsProbeResponse:              probe.matches,
-		Deliver:                      s.client.pushIncomingDataPacket,
+		Dialer:          s.client.options.Dialer,
+		Remote:          espConfiguration.Remote,
+		Keys:            espConfiguration.Keys,
+		MTU:             int(configuration.Configuration.MTU),
+		DPD:             configuration.DPD,
+		Logger:          s.client.options.Logger,
+		BuildProbe:      probe.build,
+		IsProbeResponse: probe.matches,
+		Deliver: func(packetBuffer *buf.Buffer) {
+			s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
+		},
 		PreserveKeysOnStartupFailure: true,
 	}
 	started := time.Now()
@@ -254,9 +267,9 @@ func (s *gpSession) startInitialESP(configuration *gpTunnelConfiguration) error 
 		return s.publishESP(channel)
 	}
 	if lastErr != nil {
-		return E.Cause(lastErr, "GlobalProtect ESP did not recover during the probe window")
+		return E.Cause(lastErr, "ESP did not recover during the probe window")
 	}
-	return E.New("GlobalProtect ESP probe window expired")
+	return E.New("ESP probe window expired")
 }
 
 func (s *gpSession) waitForESP(channel *espChannel, deadline time.Time) (bool, error) {
@@ -287,7 +300,7 @@ func (s *gpSession) waitForESP(channel *espChannel, deadline time.Time) (bool, e
 		if open {
 			return false, channelErr
 		}
-		return false, E.New("GlobalProtect ESP channel closed before establishment")
+		return false, E.New("ESP channel closed before establishment")
 	case <-timer.C:
 		return false, nil
 	}
@@ -301,7 +314,7 @@ func (s *gpSession) publishESP(channel *espChannel) error {
 	}
 	if s.phase != gpSessionPhaseAwaitingESP || s.esp != channel || !channel.Ready() {
 		s.access.Unlock()
-		return E.New("GlobalProtect ESP channel lost phase ownership during startup")
+		return E.New("ESP channel lost phase ownership during startup")
 	}
 	s.phase = gpSessionPhaseESP
 	s.ready.Store(true)
@@ -324,7 +337,7 @@ func (s *gpSession) openGPST() error {
 	configuration := s.configuration
 	s.access.RUnlock()
 	if configuration == nil {
-		return E.New("GlobalProtect GPST start requires tunnel configuration")
+		return E.New("GPST start requires tunnel configuration")
 	}
 	if configuration.ESP != nil && configuration.ESP.Keys != nil {
 		configuration.ESP.Keys.destroy()
@@ -336,7 +349,9 @@ func (s *gpSession) openGPST() error {
 		MTU:        int(configuration.Configuration.MTU),
 		DPD:        configuration.DPD,
 		Keepalive:  configuration.Keepalive,
-		Deliver:    s.client.pushIncomingDataPacket,
+		Deliver: func(packetBuffer *buf.Buffer) {
+			s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
+		},
 	})
 	if err != nil {
 		return E.Cause(err, "initialize GlobalProtect GPST channel")
@@ -366,7 +381,7 @@ func (s *gpSession) openGPST() error {
 		if s.closed {
 			return ErrClientClosed
 		}
-		return E.New("GlobalProtect GPST channel closed during startup")
+		return E.New("GPST channel closed during startup")
 	}
 	s.phase = gpSessionPhaseGPST
 	s.ready.Store(true)
@@ -449,9 +464,9 @@ func (s *gpSession) controlLoop() {
 				}
 				if s.client.options.Logger != nil {
 					if transportErr == nil {
-						s.client.options.Logger.WarnContext(s.ctx, "GlobalProtect ESP stopped; switching to GPST")
+						s.client.options.Logger.WarnContext(s.ctx, "ESP stopped; switching to GPST")
 					} else {
-						s.client.options.Logger.WarnContext(s.ctx, "GlobalProtect ESP failed; switching to GPST: ", transportErr)
+						s.client.options.Logger.WarnContext(s.ctx, "ESP failed; switching to GPST: ", transportErr)
 					}
 				}
 				err := s.openGPST()
@@ -462,7 +477,7 @@ func (s *gpSession) controlLoop() {
 				continue
 			}
 			if transportErr == nil {
-				transportErr = E.New("GlobalProtect GPST channel closed unexpectedly")
+				transportErr = E.New("GPST channel closed unexpectedly")
 			}
 			s.terminate(transportErr)
 			return
@@ -515,7 +530,7 @@ func (s *gpSession) performPeriodicHIP() (time.Duration, error) {
 	runner := s.hipRunner
 	s.access.RUnlock()
 	if runner == nil {
-		return 0, E.New("GlobalProtect periodic HIP check has no runner")
+		return 0, E.New("periodic HIP check has no runner")
 	}
 	if phase == gpSessionPhaseGPST {
 		_, oldESP, oldGPST, err := s.claimGPSTPhase()
@@ -596,7 +611,7 @@ func (s *gpSession) WriteDataPacketBuffers(packetBuffers []*buf.Buffer) error {
 
 func (s *gpSession) Fail(err error) {
 	if err == nil {
-		err = E.New("GlobalProtect session failed")
+		err = E.New("session failed")
 	}
 	s.terminate(err)
 }

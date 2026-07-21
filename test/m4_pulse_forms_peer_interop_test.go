@@ -64,16 +64,8 @@ func TestM4PulseIndependentAuthenticationForms(t *testing.T) {
 	answeredForms := make(map[string]bool)
 	for !client.Ready() {
 		formUpdated := client.AuthChallengeUpdated()
-		select {
-		case <-ctx.Done():
-			t.Fatal(E.Cause(ctx.Err(), "wait for Pulse authentication forms"))
-		case peerErr := <-peer.failures:
-			t.Fatal(peerErr)
-		case <-formUpdated:
-			form := client.PendingAuthChallenge()
-			if form == nil {
-				continue
-			}
+		form := client.PendingAuthChallenge()
+		if form != nil {
 			formKind, values := answerM4PulseForm(t, form)
 			if answeredForms[formKind] {
 				t.Fatal("Pulse published a duplicate authentication form: ", formKind)
@@ -83,6 +75,14 @@ func TestM4PulseIndependentAuthenticationForms(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal(E.Cause(ctx.Err(), "wait for Pulse authentication forms"))
+		case peerErr := <-peer.failures:
+			t.Fatal(peerErr)
+		case <-formUpdated:
 		case <-time.After(10 * time.Millisecond):
 		}
 	}

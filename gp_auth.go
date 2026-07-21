@@ -10,8 +10,6 @@ import (
 	"net/http/httptrace"
 	"net/netip"
 	"net/url"
-	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -148,33 +146,15 @@ func init() {
 
 func newGPFrontend(client *Client) (*gpFrontend, error) {
 	if client.options.ReportedOS == "" {
-		switch runtime.GOOS {
-		case "darwin":
-			client.options.ReportedOS = "mac-intel"
-		case "windows":
-			client.options.ReportedOS = "win"
-		case "android":
-			client.options.ReportedOS = "android"
-		case "ios":
-			client.options.ReportedOS = "apple-ios"
-		default:
-			client.options.ReportedOS = "linux-64"
-		}
+		client.options.ReportedOS = defaultReportedOS()
 	}
 	switch client.options.ReportedOS {
 	case "linux", "linux-64", "win", "mac-intel", "android", "apple-ios":
 	default:
 		return nil, E.New("unsupported GlobalProtect reported OS: ", client.options.ReportedOS)
 	}
-	localHostname, err := os.Hostname()
-	if err != nil {
-		return nil, E.Cause(err, "read local hostname for GlobalProtect identity")
-	}
-	if localHostname == "" {
-		return nil, E.New("local hostname for GlobalProtect identity is empty")
-	}
 	authenticationClient := &http.Client{
-		Transport: client.httpTransport,
+		Transport: client.wrapHTTPTransport(client.httpTransport),
 		Jar:       client.httpClient.Jar,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -183,7 +163,7 @@ func newGPFrontend(client *Client) (*gpFrontend, error) {
 	return &gpFrontend{
 		client:               client,
 		authenticationClient: authenticationClient,
-		localHostname:        localHostname,
+		localHostname:        client.options.LocalHostname,
 	}, nil
 }
 
@@ -196,6 +176,17 @@ func (f *gpFrontend) BeginAuthentication() authContinuation {
 		serverURL.RawPath = ""
 		serverURL.RawQuery = ""
 		serverURL.Fragment = ""
+		directCookie := f.client.takeDirectCookie()
+		if directCookie != "" {
+			return &completedAuthentication{session: &gpSessionState{
+				frontend:      f,
+				serverURL:     serverURL,
+				opaqueQuery:   directCookie,
+				clientVersion: gpDefaultClientVersion,
+				previousIPv4:  f.previousIPv4,
+				previousIPv6:  f.previousIPv6,
+			}}
+		}
 		parseErr = f.resetAuthenticationJar()
 	}
 	previousIPv4 := f.previousIPv4
@@ -220,7 +211,7 @@ func (f *gpFrontend) ConnectTunnel(ctx context.Context, obtained obtainedSession
 		return nil, E.Extend(ErrProtocolNotSupported, "invalid GlobalProtect obtained session")
 	}
 	snapshot := session.snapshot()
-	if session.frontend != f || snapshot.serverURL == nil || snapshot.opaqueQuery == "" || !snapshot.authenticatedAddress.IsValid() {
+	if session.frontend != f || snapshot.serverURL == nil || snapshot.opaqueQuery == "" {
 		return nil, ErrSessionRejected
 	}
 	return newGPSession(ctx, f.client, session, snapshot), nil
@@ -272,7 +263,7 @@ func (a *gpAuthentication) Advance(
 	}
 	if a.advancing {
 		a.access.Unlock()
-		return nil, nil, E.Extend(ErrProtocolNotSupported, "GlobalProtect authentication continuation is already advancing")
+		return nil, nil, E.Extend(ErrProtocolNotSupported, "authentication continuation is already advancing")
 	}
 	a.advancing = true
 	stage := a.stage
@@ -304,7 +295,7 @@ func (a *gpAuthentication) Advance(
 		}
 		return a.advanceGatewaySelection(ctx, response)
 	case gpAuthenticationComplete:
-		return nil, nil, E.Extend(ErrProtocolNotSupported, "GlobalProtect authentication continuation is already complete")
+		return nil, nil, E.Extend(ErrProtocolNotSupported, "authentication continuation is already complete")
 	default:
 		return nil, nil, E.Extend(ErrProtocolNotSupported, "invalid GlobalProtect authentication continuation stage")
 	}
@@ -318,7 +309,10 @@ func (a *gpAuthentication) advancePrelogin(ctx context.Context) (obtainedSession
 	preloginURL := cloneGPURL(a.currentURL)
 	preloginURL.Path = "/" + interfacePath + "/prelogin.esp"
 	preloginURL.RawQuery = "tmp=tmp&clientVer=4100&clientos=" + encodeGPFormComponent(reportedGPOS(a.frontend.client))
-	form := []gpFormParameter{{name: "cas-support", value: "yes"}}
+	var form []gpFormParameter
+	if !a.frontend.client.options.ExternalAuthDisabled {
+		form = []gpFormParameter{{name: "cas-support", value: "yes"}}
+	}
 	httpResponse, err := a.doAuthenticationRequest(ctx, preloginURL, form, true)
 	if err != nil {
 		return nil, nil, err
@@ -328,7 +322,7 @@ func (a *gpAuthentication) advancePrelogin(ctx context.Context) (obtainedSession
 		return a.advancePrelogin(ctx)
 	}
 	if httpResponse.statusCode != http.StatusOK {
-		return nil, nil, gpHTTPStatusError(httpResponse.statusCode, "GlobalProtect prelogin returned HTTP ")
+		return nil, nil, gpHTTPStatusError(httpResponse.statusCode, "prelogin returned HTTP ")
 	}
 	prelogin, err := parseGPPreloginResponse(httpResponse.body)
 	if err != nil {
@@ -345,8 +339,11 @@ func (a *gpAuthentication) advancePrelogin(ctx context.Context) (obtainedSession
 	a.region = prelogin.region
 	a.currentForm = a.buildLoginForm(prelogin)
 	if prelogin.samlMethod != "" || prelogin.samlRequest != "" {
+		if a.frontend.client.options.ExternalAuthDisabled {
+			return nil, nil, markTerminal(E.Extend(ErrProtocolNotSupported, "gateway requested disabled external authentication"))
+		}
 		if prelogin.samlMethod == "" || prelogin.samlRequest == "" {
-			return nil, nil, E.Extend(ErrProtocolNotSupported, "GlobalProtect prelogin returned incomplete SAML parameters")
+			return nil, nil, E.Extend(ErrProtocolNotSupported, "prelogin returned incomplete SAML parameters")
 		}
 		return a.processSAMLPrelogin(prelogin)
 	}
@@ -391,7 +388,7 @@ func (a *gpAuthentication) advanceSAML(
 		secretValue = gpBrowserHeader(response.BrowserResult.Header, secretName)
 	}
 	if username == "" || secretValue == "" {
-		return nil, nil, E.Errors(ErrInvalidBrowserAuthentication, E.New("GlobalProtect SAML browser result omitted saml-username or authentication cookie headers"))
+		return nil, nil, E.Errors(ErrInvalidBrowserAuthentication, E.New("SAML browser result omitted saml-username or authentication cookie headers"))
 	}
 	a.currentForm.usernameValue = username
 	a.currentForm.secretName = secretName
@@ -406,11 +403,11 @@ func (a *gpAuthentication) advanceLogin(
 ) (obtainedSession, *authenticationRequest, error) {
 	username, usernameLoaded := response.Values[gpUsernameSubmissionKey]
 	if !usernameLoaded {
-		return nil, nil, E.Extend(ErrProtocolNotSupported, "GlobalProtect login response omitted username")
+		return nil, nil, E.Extend(ErrProtocolNotSupported, "login response omitted username")
 	}
 	secret, secretLoaded := response.Values[gpSecretSubmissionKey]
 	if !secretLoaded {
-		return nil, nil, E.Extend(ErrProtocolNotSupported, "GlobalProtect login response omitted secret")
+		return nil, nil, E.Extend(ErrProtocolNotSupported, "login response omitted secret")
 	}
 	a.currentForm.usernameValue = username
 	a.currentForm.secretValue = secret
@@ -434,7 +431,7 @@ func (a *gpAuthentication) submitLogin(ctx context.Context) (obtainedSession, *a
 		return a.handleRejectedLogin(ctx, strings.TrimSpace(string(httpResponse.body)))
 	}
 	if httpResponse.statusCode != http.StatusOK {
-		return nil, nil, gpHTTPStatusError(httpResponse.statusCode, "GlobalProtect login returned HTTP ")
+		return nil, nil, gpHTTPStatusError(httpResponse.statusCode, "login returned HTTP ")
 	}
 	a.recordHTTPResponse(httpResponse)
 	if a.currentInterface == gpInterfacePortal {
@@ -559,14 +556,14 @@ func (a *gpAuthentication) advanceGatewaySelection(
 ) (obtainedSession, *authenticationRequest, error) {
 	selection, loaded := response.Values[gpGatewaySubmissionKey]
 	if !loaded {
-		return nil, nil, E.Extend(ErrProtocolNotSupported, "GlobalProtect gateway selection response omitted gateway")
+		return nil, nil, E.Extend(ErrProtocolNotSupported, "gateway selection response omitted gateway")
 	}
 	for _, gateway := range a.gatewayChoices {
 		if gateway.formValue == selection {
 			return a.selectGateway(ctx, gateway)
 		}
 	}
-	return nil, nil, E.Extend(ErrProtocolNotSupported, "GlobalProtect gateway selection returned an unknown gateway")
+	return nil, nil, E.Extend(ErrProtocolNotSupported, "gateway selection returned an unknown gateway")
 }
 
 func (a *gpAuthentication) selectGateway(
@@ -582,7 +579,7 @@ func (a *gpAuthentication) selectGateway(
 		return nil, nil, err
 	}
 	if gatewayURL.Path != "" || gatewayURL.RawQuery != "" || gatewayURL.Fragment != "" {
-		return nil, nil, E.New("GlobalProtect portal returned a gateway endpoint with an unsupported path, query, or fragment: ", gateway.name)
+		return nil, nil, E.New("portal returned a gateway endpoint with an unsupported path, query, or fragment: ", gateway.name)
 	}
 	if !equalGPEndpoint(a.currentURL, gatewayURL) {
 		err = a.frontend.resetAuthenticationJar()
@@ -689,6 +686,10 @@ func (a *gpAuthentication) buildLoginRequest() *authenticationRequest {
 }
 
 func (a *gpAuthentication) buildLoginValues() []gpFormParameter {
+	ipv6Support := "yes"
+	if a.frontend.client.options.IPv6Disabled {
+		ipv6Support = "no"
+	}
 	values := []gpFormParameter{
 		{name: "jnlpReady", value: "jnlpReady"},
 		{name: "ok", value: "Login"},
@@ -696,7 +697,7 @@ func (a *gpAuthentication) buildLoginValues() []gpFormParameter {
 		{name: "clientVer", value: "4100"},
 		{name: "prot", value: "https:"},
 		{name: "internal", value: "no"},
-		{name: "ipv6-support", value: "yes"},
+		{name: "ipv6-support", value: ipv6Support},
 		{name: "clientos", value: reportedGPOS(a.frontend.client)},
 		{name: "os-version", value: a.frontend.client.options.ReportedOS},
 		{name: "server", value: a.currentURL.Hostname()},
@@ -711,7 +712,7 @@ func (a *gpAuthentication) buildLoginValues() []gpFormParameter {
 	if a.previousIPv4.IsValid() {
 		values = append(values, gpFormParameter{name: "preferred-ip", value: a.previousIPv4.String()})
 	}
-	if a.previousIPv6.IsValid() {
+	if !a.frontend.client.options.IPv6Disabled && a.previousIPv6.IsValid() {
 		values = append(values, gpFormParameter{name: "preferred-ipv6", value: a.previousIPv6.String()})
 	}
 	if a.currentForm.inputString != "" {
@@ -767,7 +768,7 @@ func (a *gpAuthentication) doAuthenticationRequest(
 	for requestIndex := 0; requestIndex < maximumRequests; requestIndex++ {
 		a.requests++
 		if a.requests > gpMaximumAuthenticationRequests {
-			return gpHTTPResponse{}, markTerminal(E.New("GlobalProtect authentication exceeded ", gpMaximumAuthenticationRequests, " wire requests"))
+			return gpHTTPResponse{}, markTerminal(E.New("authentication exceeded ", gpMaximumAuthenticationRequests, " wire requests"))
 		}
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, currentURL.String(), bytes.NewBufferString(formBody))
 		if err != nil {
@@ -812,7 +813,7 @@ func (a *gpAuthentication) doAuthenticationRequest(
 			return gpHTTPResponse{}, E.Cause(closeErr, "close GlobalProtect authentication response")
 		}
 		if len(responseBody) > gpMaximumAuthenticationBody {
-			return gpHTTPResponse{}, markTerminal(E.New("GlobalProtect authentication response exceeds ", gpMaximumAuthenticationBody, " bytes"))
+			return gpHTTPResponse{}, markTerminal(E.New("authentication response exceeds ", gpMaximumAuthenticationBody, " bytes"))
 		}
 		locationHeader := response.Header.Get("Location")
 		if !followRedirects || !gpRedirectStatus(response.StatusCode) || locationHeader == "" {
@@ -841,7 +842,7 @@ func (a *gpAuthentication) doAuthenticationRequest(
 		}
 		currentURL = location
 	}
-	return gpHTTPResponse{}, markTerminal(E.New("GlobalProtect authentication exceeded ", maximumRequests, " redirect requests"))
+	return gpHTTPResponse{}, markTerminal(E.New("authentication exceeded ", maximumRequests, " redirect requests"))
 }
 
 func (a *gpAuthentication) recordHTTPResponse(response gpHTTPResponse) {
@@ -878,7 +879,7 @@ func (s *gpSessionState) snapshot() gpSessionSnapshot {
 func (s *gpSessionState) Close() error {
 	s.closeOnce.Do(func() {
 		snapshot := s.snapshot()
-		if snapshot.serverURL != nil && snapshot.opaqueQuery != "" {
+		if snapshot.serverURL != nil && snapshot.opaqueQuery != "" && snapshot.authenticatedAddress.IsValid() {
 			ctx, cancel := context.WithTimeout(context.Background(), gpLogoutTimeout)
 			s.closeErr = s.frontend.logout(ctx, snapshot)
 			cancel()
@@ -893,7 +894,7 @@ func (s *gpSessionState) Close() error {
 // Upstream gpst_bye sends the complete authenticated query because logout validation includes otherwise redundant portal, user, computer, and domain values.
 func (f *gpFrontend) logout(ctx context.Context, snapshot gpSessionSnapshot) error {
 	if !snapshot.authenticatedAddress.IsValid() {
-		return E.New("GlobalProtect logout requires the authenticated gateway address")
+		return E.New("logout requires the authenticated gateway address")
 	}
 	logoutURL := cloneGPURL(snapshot.serverURL)
 	logoutURL.Path = "/ssl-vpn/logout.esp"
@@ -910,17 +911,17 @@ func (f *gpFrontend) logout(ctx context.Context, snapshot gpSessionSnapshot) err
 			return nil, E.Cause(splitErr, "parse GlobalProtect logout destination")
 		}
 		if !strings.EqualFold(destinationHostname, gatewayHostname) || destinationPort != gatewayPort {
-			return nil, E.New("GlobalProtect logout attempted to dial outside the authenticated gateway endpoint")
+			return nil, E.New("logout attempted to dial outside the authenticated gateway endpoint")
 		}
 		parsedPort, parseErr := strconv.ParseUint(destinationPort, 10, 16)
 		if parseErr != nil || parsedPort == 0 {
-			return nil, E.New("GlobalProtect logout attempted to dial an invalid gateway port")
+			return nil, E.New("logout attempted to dial an invalid gateway port")
 		}
 		destination := M.ParseSocksaddrHostPort(snapshot.authenticatedAddress.String(), uint16(parsedPort))
 		return f.client.options.Dialer.DialContext(dialContext, network, destination)
 	}
 	logoutClient := &http.Client{
-		Transport: transport,
+		Transport: f.client.wrapHTTPTransport(transport),
 		Jar:       f.authenticationClient.Jar,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -962,10 +963,10 @@ func (f *gpFrontend) logout(ctx context.Context, snapshot gpSessionSnapshot) err
 		return E.Cause(closeErr, "close GlobalProtect logout response")
 	}
 	if len(responseBody) > gpMaximumAuthenticationBody {
-		return E.New("GlobalProtect logout response exceeds ", gpMaximumAuthenticationBody, " bytes")
+		return E.New("logout response exceeds ", gpMaximumAuthenticationBody, " bytes")
 	}
 	if response.StatusCode != http.StatusOK {
-		return E.New("GlobalProtect logout returned HTTP ", response.StatusCode)
+		return E.New("logout returned HTTP ", response.StatusCode)
 	}
 	return parseGPLogoutResponse(responseBody)
 }
@@ -978,7 +979,7 @@ func parseGPServerTarget(serverURL *url.URL) (gpInterface, bool, string, error) 
 		alternateSecret = serverPath[separator+1:]
 		serverPath = serverPath[:separator]
 		if alternateSecret == "" {
-			return gpInterfacePortal, false, "", E.New("GlobalProtect alternate secret field name is empty")
+			return gpInterfacePortal, false, "", E.New("alternate secret field name is empty")
 		}
 	}
 	switch serverPath {

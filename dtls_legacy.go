@@ -46,7 +46,7 @@ func isAnyConnectLegacyDTLS(cipherSuite string, dtls12 bool) bool {
 		return false
 	}
 	switch cipherSuite {
-	case "DHE-RSA-AES128-SHA", "DHE-RSA-AES256-SHA", "AES128-SHA", "AES256-SHA", "DES-CBC3-SHA":
+	case "DHE-RSA-AES128-SHA", "DHE-RSA-AES256-SHA", "AES128-SHA", "AES256-SHA", "DES-CBC3-SHA", "DES-CBC-SHA":
 		return true
 	default:
 		return false

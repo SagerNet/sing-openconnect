@@ -13,8 +13,6 @@ import (
 	"net/http/cookiejar"
 	"net/netip"
 	"net/url"
-	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -98,37 +96,19 @@ func init() {
 
 func newPulseFrontend(client *Client) (*pulseFrontend, error) {
 	if client.options.ReportedOS == "" {
-		switch runtime.GOOS {
-		case "darwin":
-			client.options.ReportedOS = "mac-intel"
-		case "windows":
-			client.options.ReportedOS = "win"
-		case "android":
-			client.options.ReportedOS = "android"
-		case "ios":
-			client.options.ReportedOS = "apple-ios"
-		default:
-			client.options.ReportedOS = "linux-64"
-		}
+		client.options.ReportedOS = defaultReportedOS()
 	}
 	switch client.options.ReportedOS {
 	case "linux", "linux-64", "win", "mac-intel", "android", "apple-ios":
 	default:
 		return nil, E.New("unsupported Pulse reported OS: ", client.options.ReportedOS)
 	}
-	localHostname, err := os.Hostname()
-	if err != nil {
-		return nil, E.Cause(err, "read local hostname for Pulse identity")
-	}
-	if localHostname == "" {
-		return nil, E.New("local hostname for Pulse identity is empty")
-	}
-	return &pulseFrontend{client: client, localHostname: localHostname}, nil
+	return &pulseFrontend{client: client, localHostname: client.options.LocalHostname}, nil
 }
 
 func (f *pulseFrontend) BeginAuthentication() authContinuation {
 	jar, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
-	return &pulseAuthentication{
+	authentication := &pulseAuthentication{
 		frontend:          f,
 		initializationErr: err,
 		serverURL:         clonePulseURL(f.client.serverURL),
@@ -136,6 +116,13 @@ func (f *pulseFrontend) BeginAuthentication() authContinuation {
 		tokenGenerator:    newSoftwareTokenGenerator(f.client.options.Token),
 		promptFlags:       pulsePromptPrimary | pulsePromptUsername | pulsePromptPassword,
 	}
+	directCookie := f.client.takeDirectCookie()
+	if directCookie != "" && err == nil {
+		authentication.cookie = []byte(directCookie)
+		authentication.connecting = true
+		jar.SetCookies(authentication.serverURL, []*http.Cookie{{Name: "DSID", Value: directCookie, Path: "/", Secure: true}})
+	}
+	return authentication
 }
 
 func (f *pulseFrontend) ConnectTunnel(ctx context.Context, obtained obtainedSession) (clientSession, error) {
@@ -198,7 +185,7 @@ func (a *pulseAuthentication) Advance(
 	}
 	if a.advancing {
 		a.access.Unlock()
-		return nil, nil, E.Extend(ErrProtocolNotSupported, "Pulse authentication continuation is already advancing")
+		return nil, nil, E.Extend(ErrProtocolNotSupported, "authentication continuation is already advancing")
 	}
 	a.advancing = true
 	a.access.Unlock()
@@ -246,7 +233,7 @@ func (a *pulseAuthentication) Advance(
 	for {
 		a.steps++
 		if a.steps > pulseMaximumAuthenticationStep {
-			return nil, nil, markTerminal(E.New("Pulse authentication exceeded ", pulseMaximumAuthenticationStep, " wire steps"))
+			return nil, nil, markTerminal(E.New("authentication exceeded ", pulseMaximumAuthenticationStep, " wire steps"))
 		}
 		packet, err := a.receiveExpandedRequest()
 		if err != nil {
@@ -364,11 +351,11 @@ func (a *pulseAuthentication) start(ctx context.Context) error {
 	} else {
 		if packet.typeValue != pulseEAPTypeTTLS {
 			clear(identity)
-			return markTerminal(E.New("Pulse server requested unsupported outer EAP type: ", packet.typeValue))
+			return markTerminal(E.New("server requested unsupported outer EAP type: ", packet.typeValue))
 		}
 		ttlsTransport := &pulseTTLSConn{outer: connection, identifier: packet.identifier}
 		tlsConfiguration := a.frontend.client.tlsConfig.Clone()
-		if a.frontend.client.options.TLSConfig.Config == nil || a.frontend.client.options.TLSConfig.Config.ServerName == "" {
+		if tlsConfiguration.ServerName == "" {
 			tlsConfiguration.ServerName = a.serverURL.Hostname()
 		}
 		tlsConfiguration.NextProtos = nil
@@ -439,7 +426,7 @@ func (a *pulseAuthentication) openConnection(ctx context.Context) (*pulseIFTConn
 		return nil, netip.Addr{}, E.Cause(err, "set Pulse TLS connection deadline")
 	}
 	tlsConfiguration := a.frontend.client.tlsConfig.Clone()
-	if a.frontend.client.options.TLSConfig.Config == nil || a.frontend.client.options.TLSConfig.Config.ServerName == "" {
+	if tlsConfiguration.ServerName == "" {
 		tlsConfiguration.ServerName = a.serverURL.Hostname()
 	}
 	tlsConfiguration.NextProtos = []string{"http/1.1"}
@@ -453,7 +440,7 @@ func (a *pulseAuthentication) openConnection(ctx context.Context) (*pulseIFTConn
 		acceptedAddress = a.acceptedAddress
 	}
 	if !acceptedAddress.IsValid() {
-		return nil, netip.Addr{}, markTerminal(E.New("Pulse TLS endpoint did not expose an accepted IP address"))
+		return nil, netip.Addr{}, markTerminal(E.New("TLS endpoint did not expose an accepted IP address"))
 	}
 	reader := bufio.NewReader(tlsConnection)
 	err = a.writeUpgradeRequest(tlsConnection)
@@ -475,7 +462,7 @@ func (a *pulseAuthentication) openConnection(ctx context.Context) (*pulseIFTConn
 		if a.connecting && (response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden) {
 			return nil, netip.Addr{}, ErrSessionRejected
 		}
-		statusErr := E.New("Pulse IF-T/TLS upgrade returned HTTP ", response.StatusCode)
+		statusErr := E.New("IF-T/TLS upgrade returned HTTP ", response.StatusCode)
 		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
 			return nil, netip.Addr{}, E.Errors(ErrAuthenticationFailed, statusErr)
 		}
@@ -551,7 +538,7 @@ func (a *pulseAuthentication) buildAuthenticationClientAVPs() ([]byte, error) {
 		return nil, err
 	}
 	userAgent := anyConnectUserAgent(a.frontend.client)
-	if !strings.HasPrefix(userAgent, "Pulse-Secure/") {
+	if !a.frontend.client.options.IPv6Disabled && !strings.HasPrefix(userAgent, "Pulse-Secure/") {
 		userAgent = "Pulse-Secure/22.2.1.1295 (" + userAgent + ")"
 	}
 	content, err = appendPulseAVP(content, 0xd70, pulseVendorJuniper2, []byte(userAgent))
@@ -646,7 +633,7 @@ func (a *pulseAuthentication) parseChallenge(packet pulseEAPPacket) (pulseAuthen
 				a.secondaryPassPrompt = normalizePulsePrompt(attribute.data)
 			case 0xd73:
 				if len(attribute.data) != 4 {
-					return pulseAuthenticationChallenge{}, markTerminal(E.New("Pulse prompt flags have invalid length"))
+					return pulseAuthenticationChallenge{}, markTerminal(E.New("prompt flags have invalid length"))
 				}
 				switch binary.BigEndian.Uint32(attribute.data) {
 				case 1:
@@ -671,7 +658,7 @@ func (a *pulseAuthentication) parseChallenge(packet pulseEAPPacket) (pulseAuthen
 				challenge.regionChoices = append(challenge.regionChoices, string(attribute.data))
 			case 0xd5c:
 				if len(attribute.data) != 4 {
-					return pulseAuthenticationChallenge{}, markTerminal(E.New("Pulse authentication expiration has invalid length"))
+					return pulseAuthenticationChallenge{}, markTerminal(E.New("authentication expiration has invalid length"))
 				}
 				seconds := binary.BigEndian.Uint32(attribute.data)
 				if seconds > 0 {
@@ -679,12 +666,12 @@ func (a *pulseAuthentication) parseChallenge(packet pulseEAPPacket) (pulseAuthen
 				}
 			case 0xd75:
 				if len(attribute.data) != 4 {
-					return pulseAuthenticationChallenge{}, markTerminal(E.New("Pulse idle timeout has invalid length"))
+					return pulseAuthenticationChallenge{}, markTerminal(E.New("idle timeout has invalid length"))
 				}
 				a.idleTimeout = time.Duration(binary.BigEndian.Uint32(attribute.data)) * time.Second
 			case 0xd53:
 				if len(attribute.data) == 0 {
-					return pulseAuthenticationChallenge{}, markTerminal(E.New("Pulse authentication returned an empty cookie"))
+					return pulseAuthenticationChallenge{}, markTerminal(E.New("authentication returned an empty cookie"))
 				}
 				clear(a.cookie)
 				a.cookie = append([]byte(nil), attribute.data...)
@@ -717,7 +704,7 @@ func (a *pulseAuthentication) parseChallenge(packet pulseEAPPacket) (pulseAuthen
 				case 2:
 					parseErr = a.parsePasswordChallenge(&challenge, innerPacket.payload)
 				case 3:
-					return pulseAuthenticationChallenge{}, markTerminal(E.Extend(ErrProtocolNotSupported, "Pulse server requested Host Checker; use the nc flavor"))
+					return pulseAuthenticationChallenge{}, markTerminal(E.Extend(ErrProtocolNotSupported, "server requested Host Checker; use the nc flavor"))
 				case 5:
 					parseErr = a.parseJuniper2021Challenge(&challenge, innerPacket.payload)
 				default:
@@ -729,7 +716,7 @@ func (a *pulseAuthentication) parseChallenge(packet pulseEAPPacket) (pulseAuthen
 				continue
 			}
 			if innerPacket.typeValue == pulseEAPTypeTLS && !a.frontend.client.configuredTLSClientCertificate() {
-				return pulseAuthenticationChallenge{}, markTerminal(E.Extend(ErrProtocolNotSupported, "Pulse server requested EAP-TLS inside EAP-TTLS without a configured client certificate"))
+				return pulseAuthenticationChallenge{}, markTerminal(E.Extend(ErrProtocolNotSupported, "server requested EAP-TLS inside EAP-TTLS without a configured client certificate"))
 			}
 			return pulseAuthenticationChallenge{}, markTerminal(E.New("unsupported Pulse nested EAP type: ", innerPacket.typeValue))
 		}
@@ -758,7 +745,7 @@ func (a *pulseAuthentication) parseChallenge(packet pulseEAPPacket) (pulseAuthen
 		categoryCount++
 	}
 	if categoryCount != 1 && !signIn {
-		return pulseAuthenticationChallenge{}, markTerminal(E.New("Pulse authentication packet mixed or omitted request categories"))
+		return pulseAuthenticationChallenge{}, markTerminal(E.New("authentication packet mixed or omitted request categories"))
 	}
 	switch {
 	case cookieReceived:
@@ -776,7 +763,7 @@ func (a *pulseAuthentication) parseChallenge(packet pulseEAPPacket) (pulseAuthen
 	case signIn:
 		challenge.kind = pulseChallengeSignIn
 	default:
-		return pulseAuthenticationChallenge{}, markTerminal(E.New("Pulse authentication packet omitted its request category"))
+		return pulseAuthenticationChallenge{}, markTerminal(E.New("authentication packet omitted its request category"))
 	}
 	primary := challenge.promptFlags&pulsePromptPrimary != 0
 	if primary {
@@ -793,29 +780,29 @@ func (a *pulseAuthentication) parseChallenge(packet pulseEAPPacket) (pulseAuthen
 
 func (a *pulseAuthentication) parsePasswordChallenge(challenge *pulseAuthenticationChallenge, payload []byte) error {
 	if len(payload) < 1 {
-		return E.New("Pulse password challenge omitted its request code")
+		return E.New("password challenge omitted its request code")
 	}
 	requestCode := payload[0]
 	challenge.passwordRequestCode = requestCode
 	switch requestCode {
 	case pulseJuniperPasswordRequest, pulseJuniperPasswordRetry:
 		if len(payload) != 1 {
-			return E.New("Pulse password request has unexpected payload")
+			return E.New("password request has unexpected payload")
 		}
 		challenge.kind = pulseChallengePassword
 		if requestCode == pulseJuniperPasswordRetry {
-			challenge.errorMessage = "Pulse rejected the previous credentials."
+			challenge.errorMessage = "rejected the previous credentials."
 		}
 	case pulseJuniperPasswordChange:
 		if len(payload) != 1 {
-			return E.New("Pulse password-change request has unexpected payload")
+			return E.New("password-change request has unexpected payload")
 		}
 		challenge.kind = pulseChallengePasswordChange
 	case pulseJuniperPasswordFailure:
 		if len(payload) <= 3 || payload[1] != 1 || int(payload[2]) != len(payload)-1 {
 			return E.New("invalid Pulse password-change failure payload")
 		}
-		return E.Errors(ErrAuthenticationFailed, E.New("Pulse password change failed: ", strings.TrimRight(string(payload[3:]), "\x00")))
+		return E.Errors(ErrAuthenticationFailed, E.New("password change failed: ", strings.TrimRight(string(payload[3:]), "\x00")))
 	default:
 		return E.New("unknown Pulse password request code: ", requestCode)
 	}
@@ -834,15 +821,15 @@ func (a *pulseAuthentication) parseJuniper2021Challenge(challenge *pulseAuthenti
 
 func (a *pulseAuthentication) authenticationFailure(content []byte) error {
 	if len(content) != 4 {
-		return markTerminal(E.New("Pulse authentication failure code has invalid length"))
+		return markTerminal(E.New("authentication failure code has invalid length"))
 	}
 	code := binary.BigEndian.Uint32(content)
-	message := "Pulse authentication failed with code " + strconv.FormatUint(uint64(code), 16)
+	message := "authentication failed with code " + strconv.FormatUint(uint64(code), 16)
 	switch code {
 	case 0x0d:
-		message = "Pulse authentication failed: account is locked"
+		message = "authentication failed: account is locked"
 	case 0x0e:
-		message = "Pulse authentication failed: client certificate is required"
+		message = "authentication failed: client certificate is required"
 	}
 	if a.connecting {
 		return E.Errors(ErrSessionRejected, E.New(message))
@@ -868,7 +855,7 @@ func (a *pulseAuthentication) checkCertificateFingerprint(content []byte) {
 	matched := strings.EqualFold(string(content), string(encoded))
 	clear(encoded)
 	if !matched && a.frontend.client.options.Logger != nil {
-		a.frontend.client.options.Logger.WarnContext(a.frontend.client.options.Context, "Pulse server certificate MD5 AVP does not match the authenticated TLS peer")
+		a.frontend.client.options.Logger.WarnContext(a.frontend.client.options.Context, "server certificate MD5 AVP does not match the authenticated TLS peer")
 	}
 }
 
@@ -895,7 +882,7 @@ func (a *pulseAuthentication) receiveAuthenticationSuccess() error {
 		return markTerminal(E.Cause(err, "parse Pulse EAP success"))
 	}
 	if packet.code != pulseEAPSuccess {
-		return E.Errors(ErrAuthenticationFailed, E.New("Pulse server did not complete EAP authentication"))
+		return E.Errors(ErrAuthenticationFailed, E.New("server did not complete EAP authentication"))
 	}
 	return nil
 }
@@ -960,7 +947,7 @@ func (s *pulseSessionState) takeLiveConnection(session *pulseSession) (*pulseIFT
 	s.access.Lock()
 	defer s.access.Unlock()
 	if s.activeSession != nil && s.activeSession != session {
-		return nil, E.New("Pulse obtained session already owns an active tunnel")
+		return nil, E.New("obtained session already owns an active tunnel")
 	}
 	if len(s.cookie) == 0 {
 		return nil, ErrSessionRejected
@@ -974,7 +961,7 @@ func (s *pulseSessionState) takeLiveConnection(session *pulseSession) (*pulseIFT
 
 func (s *pulseSessionState) installReconnect(result *pulseSessionState, session *pulseSession) (*pulseIFTConnection, error) {
 	if result == nil {
-		return nil, E.New("Pulse cookie reconnect returned an empty session")
+		return nil, E.New("cookie reconnect returned an empty session")
 	}
 	s.access.Lock()
 	defer s.access.Unlock()
@@ -1076,12 +1063,12 @@ func (f *pulseFrontend) logout(ctx context.Context, snapshot pulseSessionSnapsho
 		}
 		parsedPort, parseErr := strconv.ParseUint(portText, 10, 16)
 		if parseErr != nil || uint16(parsedPort) != port || !strings.EqualFold(hostname, expectedHostname) {
-			return nil, E.New("Pulse logout attempted to dial outside the accepted endpoint")
+			return nil, E.New("logout attempted to dial outside the accepted endpoint")
 		}
 		return f.client.options.Dialer.DialContext(dialContext, network, M.ParseSocksaddrHostPort(snapshot.acceptedAddress.String(), port))
 	}
 	logoutClient := &http.Client{
-		Transport: transport,
+		Transport: f.client.wrapHTTPTransport(transport),
 		Jar:       snapshot.jar,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -1106,7 +1093,7 @@ func (f *pulseFrontend) logout(ctx context.Context, snapshot pulseSessionSnapsho
 		return E.Cause(closeErr, "close Pulse logout response")
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return E.New("Pulse logout returned HTTP ", response.StatusCode)
+		return E.New("logout returned HTTP ", response.StatusCode)
 	}
 	return nil
 }
@@ -1118,7 +1105,7 @@ func pulseURLPort(serverURL *url.URL) (uint16, error) {
 	}
 	port, err := strconv.ParseUint(portText, 10, 16)
 	if err != nil || port == 0 {
-		return 0, E.New("Pulse server URL has an invalid port")
+		return 0, E.New("server URL has an invalid port")
 	}
 	return uint16(port), nil
 }

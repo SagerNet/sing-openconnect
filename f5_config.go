@@ -68,6 +68,11 @@ func (s *f5SessionState) loadConfiguration(ctx context.Context) (*f5TunnelConfig
 		if configurationErr != nil && classifyClientSessionError(configurationErr) != clientSessionErrorTerminal {
 			configurationErr = E.Errors(ErrSessionRejected, configurationErr)
 		}
+		if configurationErr == nil && configuration != nil {
+			s.access.Lock()
+			s.acceptedAddress = configuration.configuration.RemoteAddress
+			s.access.Unlock()
+		}
 		s.configuration = configuration
 		s.configurationErr = configurationErr
 	})
@@ -75,7 +80,7 @@ func (s *f5SessionState) loadConfiguration(ctx context.Context) (*f5TunnelConfig
 		return nil, s.configurationErr
 	}
 	if s.configuration == nil {
-		return nil, markTerminal(E.New("F5 configuration fetch returned no configuration"))
+		return nil, markTerminal(E.New("configuration fetch returned no configuration"))
 	}
 	return s.configuration, nil
 }
@@ -84,7 +89,7 @@ func (f *f5Frontend) fetchTunnelConfiguration(
 	ctx context.Context,
 	snapshot f5SessionSnapshot,
 ) (*f5TunnelConfiguration, error) {
-	httpClient, transport, clientErr := f.newPinnedHTTPClient(snapshot)
+	httpClient, transport, peer, clientErr := f.newPinnedHTTPClient(snapshot)
 	if clientErr != nil {
 		return nil, clientErr
 	}
@@ -102,7 +107,7 @@ func (f *f5Frontend) fetchTunnelConfiguration(
 		return nil, markTerminal(parseProfileErr)
 	}
 	if strings.ContainsAny(profileParameters, "\r\n#") {
-		return nil, markTerminal(E.New("F5 profile parameters contain invalid request characters"))
+		return nil, markTerminal(E.New("profile parameters contain invalid request characters"))
 	}
 	optionsURL := cloneF5URL(snapshot.serverURL)
 	optionsURL.Path = "/vdesk/vpn/connect.php3"
@@ -116,6 +121,38 @@ func (f *f5Frontend) fetchTunnelConfiguration(
 	if parseOptionsErr != nil {
 		return nil, markTerminal(parseOptionsErr)
 	}
+	if f.client.options.IPv6Disabled {
+		configuration.wantIPv6 = false
+		if !configuration.wantIPv4 {
+			return nil, markTerminal(E.New("server did not provide IPv4 tunnel configuration"))
+		}
+	}
+	acceptedAddress := peer.address
+	if !acceptedAddress.IsValid() {
+		return nil, markTerminal(E.New("configuration endpoint did not expose an accepted IP address"))
+	}
+	encapsulation := pppEncapsulationF5
+	if configuration.hdlc {
+		encapsulation = pppEncapsulationF5HDLC
+	}
+	configuration.configuration.MTU = calculatePPPTunnelMTU(
+		f.client.options.MTU,
+		f.client.options.BaseMTU,
+		acceptedAddress.Is6(),
+		encapsulation,
+	)
+	ipv6Disabled := f.client.options.IPv6Disabled || configuration.configuration.MTU < minimumIPv6MTU
+	if ipv6Disabled {
+		configuration.wantIPv6 = false
+		if !configuration.wantIPv4 {
+			return nil, markTerminal(E.New("calculated tunnel MTU is too small for the server's IPv6-only configuration"))
+		}
+	}
+	configuration.configuration.RemoteAddress = acceptedAddress.Unmap()
+	configuration.configuration = normalizeTunnelConfiguration(
+		configuration.configuration,
+		ipv6Disabled,
+	)
 	connectRequest, buildErr := buildF5ConnectRequest(f.client, snapshot.serverURL, f.localHostname, configuration)
 	if buildErr != nil {
 		return nil, markTerminal(buildErr)
@@ -150,13 +187,13 @@ func (f *f5Frontend) doConfigurationRequest(
 		return nil, E.Cause(closeErr, "close F5 ", description, " response")
 	}
 	if len(responseBody) > f5MaximumAuthenticationBody {
-		return nil, markTerminal(E.New("F5 ", description, " response exceeds ", f5MaximumAuthenticationBody, " bytes"))
+		return nil, markTerminal(E.New(description, " response exceeds ", f5MaximumAuthenticationBody, " bytes"))
 	}
 	if isF5RedirectStatus(response.StatusCode) || response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
 		return nil, ErrSessionRejected
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, E.New("F5 ", description, " returned HTTP ", response.StatusCode)
+		return nil, E.New(description, " returned HTTP ", response.StatusCode)
 	}
 	return responseBody, nil
 }
@@ -168,7 +205,7 @@ func parseF5Profile(content []byte) (string, error) {
 		return "", E.Cause(decodeErr, "decode F5 VPN profile XML")
 	}
 	if profile.XMLName.Local != "favorites" || profile.Type != "VPN" {
-		return "", E.New("F5 VPN profile has no VPN favorites root")
+		return "", E.New("VPN profile has no VPN favorites root")
 	}
 	for _, favorite := range profile.Favorites {
 		parameters := strings.TrimSpace(favorite.Params)
@@ -176,7 +213,7 @@ func parseF5Profile(content []byte) (string, error) {
 			return parameters, nil
 		}
 	}
-	return "", E.New("F5 VPN profile has no favorite parameters")
+	return "", E.New("VPN profile has no favorite parameters")
 }
 
 func parseF5Options(content []byte, authenticationExpiration time.Time) (*f5TunnelConfiguration, error) {
@@ -190,7 +227,7 @@ func parseF5Options(content []byte, authenticationExpiration time.Time) (*f5Tunn
 		return nil, E.Cause(decodeErr, "decode F5 VPN options XML")
 	}
 	if document.XMLName.Local != "favorite" || len(document.Objects) == 0 {
-		return nil, E.New("F5 VPN options has no favorite object")
+		return nil, E.New("VPN options has no favorite object")
 	}
 	configuration := &f5TunnelConfiguration{
 		configuration: TunnelConfiguration{
@@ -234,7 +271,7 @@ func parseF5Options(content []byte, authenticationExpiration time.Time) (*f5Tunn
 				return nil, E.Cause(parseErr, "parse F5 idle timeout")
 			}
 			if seconds > math.MaxInt64/int64(time.Second) {
-				return nil, E.New("F5 idle timeout exceeds supported duration")
+				return nil, E.New("idle timeout exceeds supported duration")
 			}
 			configuration.configuration.IdleTimeout = time.Duration(seconds) * time.Second
 		case "tunnel_dtls":
@@ -250,7 +287,7 @@ func parseF5Options(content []byte, authenticationExpiration time.Time) (*f5Tunn
 			}
 			port, parseErr := strconv.ParseUint(value, 10, 16)
 			if parseErr != nil {
-				return nil, E.New("F5 DTLS port is invalid: ", value)
+				return nil, E.New("DTLS port is invalid: ", value)
 			}
 			configuration.dtlsPort = uint16(port)
 		case "dtls_v1_2_supported":
@@ -307,10 +344,10 @@ func parseF5Options(content []byte, authenticationExpiration time.Time) (*f5Tunn
 		}
 	}
 	if configuration.sessionID == "" || configuration.urZ == "" {
-		return nil, E.New("F5 VPN options is missing Session_ID or ur_Z")
+		return nil, E.New("VPN options is missing Session_ID or ur_Z")
 	}
 	if !configuration.wantIPv4 && !configuration.wantIPv6 {
-		return nil, E.New("F5 VPN options enables no network family")
+		return nil, E.New("VPN options enables no network family")
 	}
 	if defaultRoute {
 		if configuration.wantIPv4 {
@@ -319,6 +356,9 @@ func parseF5Options(content []byte, authenticationExpiration time.Time) (*f5Tunn
 		if configuration.wantIPv6 {
 			configuration.configuration.Routes = append(configuration.configuration.Routes, TunnelRoute{Prefix: netip.PrefixFrom(netip.IPv6Unspecified(), 0)})
 		}
+	} else {
+		configuration.configuration.defaultIPv4RouteSuppressed = configuration.wantIPv4
+		configuration.configuration.defaultIPv6RouteSuppressed = configuration.wantIPv6
 	}
 	configuration.dtlsEnabled = dtlsAdvertised && configuration.dtlsPort != 0 && !configuration.hdlc
 	return configuration, nil
@@ -339,22 +379,22 @@ func validateF5OptionsStructure(content []byte) error {
 		case xml.StartElement:
 			if !rootFound {
 				if typedToken.Name.Local != "favorite" {
-					return E.New("F5 VPN options root is not favorite")
+					return E.New("VPN options root is not favorite")
 				}
 				rootFound = true
 				continue
 			}
 			if typedToken.Name.Local != "object" {
-				return E.New("F5 VPN options first favorite child is not object")
+				return E.New("VPN options first favorite child is not object")
 			}
 			return nil
 		case xml.EndElement:
 			if rootFound && typedToken.Name.Local == "favorite" {
-				return E.New("F5 VPN options favorite has no object")
+				return E.New("VPN options favorite has no object")
 			}
 		}
 	}
-	return E.New("F5 VPN options document is empty")
+	return E.New("VPN options document is empty")
 }
 
 func buildF5ConnectRequest(
@@ -364,7 +404,7 @@ func buildF5ConnectRequest(
 	configuration *f5TunnelConfiguration,
 ) ([]byte, error) {
 	if serverURL == nil || configuration == nil {
-		return nil, E.New("F5 connect request requires an endpoint and configuration")
+		return nil, E.New("connect request requires an endpoint and configuration")
 	}
 	userAgent := f5UserAgent(client)
 	for name, value := range map[string]string{
@@ -374,7 +414,7 @@ func buildF5ConnectRequest(
 		"user agent":     userAgent,
 	} {
 		if strings.ContainsAny(value, "\r\n") {
-			return nil, E.New("F5 connect ", name, " contains a line break")
+			return nil, E.New("connect ", name, " contains a line break")
 		}
 	}
 	port, portErr := f5URLPort(serverURL)

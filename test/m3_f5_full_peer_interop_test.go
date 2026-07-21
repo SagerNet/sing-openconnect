@@ -32,6 +32,7 @@ import (
 const (
 	m3F5FullPeerImage    = "sing-openconnect-f5-peer:m3"
 	m3F5FullPeerHostname = "f5.test"
+	minimumM3IPv6MTU     = 1280
 )
 
 type m3F5FullPeerCase struct {
@@ -46,6 +47,9 @@ type m3F5FullPeerCase struct {
 	tlsRecovery         bool
 	recoveryTransport   string
 	forbiddenMarkers    []string
+	baseMTU             uint32
+	expectedMTU         uint32
+	expectNoRoutes      bool
 }
 
 type m3F5FullPeerCertificateFixture struct {
@@ -111,6 +115,22 @@ func TestM3F5IndependentFullPeerMatrix(t *testing.T) {
 		{
 			name:            "tls-hdlc-dual-stack",
 			environment:     map[string]string{"HDLC": "1"},
+			expectedMTU:     1314,
+			expectedCarrier: "TLS",
+			expectedTunnels: []string{"F5_PEER_TLS_TUNNEL_1"},
+		},
+		{
+			name:            "tls-base-mtu",
+			environment:     map[string]string{"EXPECT_IPV6": "0"},
+			baseMTU:         1280,
+			expectedMTU:     1230,
+			expectedCarrier: "TLS",
+			expectedTunnels: []string{"F5_PEER_TLS_TUNNEL_1"},
+		},
+		{
+			name:            "split-tunnel-without-includes",
+			environment:     map[string]string{"NO_ROUTES": "1"},
+			expectNoRoutes:  true,
 			expectedCarrier: "TLS",
 			expectedTunnels: []string{"F5_PEER_TLS_TUNNEL_1"},
 		},
@@ -399,6 +419,7 @@ func runM3F5FullPeerCase(
 		Username:            "test",
 		Password:            "test",
 		AllowInsecureCrypto: testCase.allowInsecureCrypto,
+		BaseMTU:             testCase.baseMTU,
 		Dialer:              dialer,
 		TLSConfig: openconnect.ClientTLSOptions{
 			CertificateAuthority: openconnect.Material{Content: rootCertificate},
@@ -420,7 +441,7 @@ func runM3F5FullPeerCase(
 		t.Fatal(E.Cause(startErr, "start independent F5 client"))
 	}
 	initialEvent := waitM3F5ConfigurationEvent(t, client, configurationEvents, openconnect.TunnelConfigurationEventInitial, 40*time.Second)
-	assertM3F5Configuration(t, initialEvent.Configuration, peer)
+	assertM3F5Configuration(t, initialEvent.Configuration, peer, testCase)
 	expectedInitialTransport := openconnect.TransportTLS
 	if testCase.expectedCarrier == "DTLS" {
 		expectedInitialTransport = openconnect.TransportDTLS
@@ -451,20 +472,22 @@ func runM3F5FullPeerCase(
 			waitForActiveTransportLossAndRecovery(t, ctx, client, activeTransportUpdated, testCase.recoveryTransport)
 		}
 		reestablished := waitM3F5ConfigurationEvent(t, client, configurationEvents, openconnect.TunnelConfigurationEventReestablishment, 40*time.Second)
-		assertM3F5Configuration(t, reestablished.Configuration, peer)
+		assertM3F5Configuration(t, reestablished.Configuration, peer, testCase)
 		exchangeM3F5IPv4(t, ctx, client, peer, 2)
 		exchangeM3F5IPv6(t, ctx, client, peer, 2)
 	} else if testCase.lateTakeover {
 		activeTransportUpdated = client.ActiveTransportUpdated()
 		exchangeM3F5IPv4(t, ctx, client, peer, 1)
 		reestablished := waitM3F5ConfigurationEvent(t, client, configurationEvents, openconnect.TunnelConfigurationEventReestablishment, 40*time.Second)
-		assertM3F5Configuration(t, reestablished.Configuration, peer)
+		assertM3F5Configuration(t, reestablished.Configuration, peer, testCase)
 		waitForActiveTransportUpdate(t, ctx, client, activeTransportUpdated, openconnect.TransportDTLS)
 		exchangeM3F5IPv4(t, ctx, client, peer, 2)
 		exchangeM3F5IPv6(t, ctx, client, peer, 2)
 	} else {
 		exchangeM3F5IPv4(t, ctx, client, peer, 1)
-		exchangeM3F5IPv6(t, ctx, client, peer, 1)
+		if initialEvent.Configuration.MTU >= minimumM3IPv6MTU {
+			exchangeM3F5IPv6(t, ctx, client, peer, 1)
+		}
 	}
 	requiredMarkers := []string{
 		"F5_PEER_AUTHENTICATED",
@@ -475,9 +498,10 @@ func runM3F5FullPeerCase(
 		"F5_PEER_SNI_" + m3F5FullPeerHostname,
 		"F5_PEER_PPPD_ECHO_REQUEST",
 		"F5_PEER_CLIENT_IPV4 ",
-		"F5_PEER_CLIENT_IPV6 ",
 		"F5_PEER_PPPD_IPV4 ",
-		"F5_PEER_PPPD_IPV6 ",
+	}
+	if initialEvent.Configuration.MTU >= minimumM3IPv6MTU {
+		requiredMarkers = append(requiredMarkers, "F5_PEER_CLIENT_IPV6 ", "F5_PEER_PPPD_IPV6 ")
 	}
 	for _, marker := range requiredMarkers {
 		waitM3F5PeerMarker(t, ctx, peer, marker, 10*time.Second)
@@ -553,26 +577,41 @@ func waitM3F5ConfigurationEvent(
 	}
 }
 
-func assertM3F5Configuration(t *testing.T, configuration openconnect.TunnelConfiguration, peer m3F5FullPeer) {
+func assertM3F5Configuration(t *testing.T, configuration openconnect.TunnelConfiguration, peer m3F5FullPeer, testCase m3F5FullPeerCase) {
 	t.Helper()
 	expectedAddresses := []netip.Prefix{
 		netip.PrefixFrom(peer.clientIPv4, 32),
-		netip.PrefixFrom(peer.clientIPv6, 64),
 	}
 	expectedDNS := []netip.Addr{netip.MustParseAddr("203.0.113.53"), netip.MustParseAddr("203.0.113.54")}
 	expectedNBNS := []netip.Addr{netip.MustParseAddr("203.0.113.137"), netip.MustParseAddr("203.0.113.138")}
-	if configuration.MTU != 1320 || !slices.Equal(configuration.Addresses, expectedAddresses) ||
+	expectedMTU := testCase.expectedMTU
+	if expectedMTU == 0 {
+		expectedMTU = 1320
+	}
+	if expectedMTU >= minimumM3IPv6MTU {
+		expectedAddresses = append(expectedAddresses, netip.PrefixFrom(peer.clientIPv6, 64))
+	}
+	if configuration.MTU != expectedMTU || !slices.Equal(configuration.Addresses, expectedAddresses) ||
 		!slices.Equal(configuration.DNS, expectedDNS) || !slices.Equal(configuration.NBNS, expectedNBNS) ||
 		!slices.Equal(configuration.SearchDomains, []string{"f5.test"}) ||
 		!slices.Equal(configuration.SplitDNS, []string{"internal.f5.test"}) ||
 		configuration.IdleTimeout != 15*time.Minute || configuration.AuthenticationExpiration.IsZero() {
 		t.Fatalf("unexpected independent F5 configuration: %+v", configuration)
 	}
-	for _, expectedPrefix := range []netip.Prefix{
+	expectedRoutes := []netip.Prefix{
 		netip.MustParsePrefix("192.0.2.0/24"),
 		netip.MustParsePrefix("198.51.100.0/24"),
-		netip.MustParsePrefix("2001:db8::/32"),
-	} {
+	}
+	if expectedMTU >= minimumM3IPv6MTU {
+		expectedRoutes = append(expectedRoutes, netip.MustParsePrefix("2001:db8::/32"))
+	}
+	if testCase.expectNoRoutes {
+		expectedRoutes = nil
+		if len(configuration.Routes) != 0 {
+			t.Fatalf("independent F5 split-tunnel configuration gained default routes: %+v", configuration.Routes)
+		}
+	}
+	for _, expectedPrefix := range expectedRoutes {
 		if !slices.ContainsFunc(configuration.Routes, func(route openconnect.TunnelRoute) bool {
 			return route.Prefix == expectedPrefix
 		}) {

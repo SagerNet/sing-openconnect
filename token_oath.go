@@ -41,7 +41,7 @@ type softwareTokenGenerator struct {
 }
 
 func newSoftwareTokenGenerator(options *TokenOptions) *softwareTokenGenerator {
-	if options == nil {
+	if options == nil || options.Mode == TokenModeOIDC {
 		return nil
 	}
 	return &softwareTokenGenerator{options: options}
@@ -56,7 +56,7 @@ func (g *softwareTokenGenerator) CanGenerate(message string) bool {
 
 func (g *softwareTokenGenerator) Generate(ctx context.Context, message string) (string, error) {
 	if g == nil || g.options == nil {
-		return "", E.New("openconnect software token is not configured")
+		return "", E.New("software token is not configured")
 	}
 	select {
 	case <-ctx.Done():
@@ -64,7 +64,7 @@ func (g *softwareTokenGenerator) Generate(ctx context.Context, message string) (
 	default:
 	}
 	if !g.canGenerate(message) {
-		return "", E.New("openconnect automatic software token attempt limit reached")
+		return "", E.New("automatic software token attempt limit reached")
 	}
 	switch g.options.Mode {
 	case TokenModeTOTP:
@@ -127,7 +127,7 @@ func (g *softwareTokenGenerator) generationTime(period uint64) (int64, error) {
 		return time.Now().Unix(), nil
 	}
 	if period > math.MaxInt64 || g.tokenUnixTime > math.MaxInt64-int64(period) {
-		return 0, E.New("openconnect software token period exceeds the supported time range")
+		return 0, E.New("software token period exceeds the supported time range")
 	}
 	return g.tokenUnixTime + int64(period), nil
 }
@@ -250,21 +250,21 @@ func decodeOATHBase32Secret(secret string) ([]byte, error) {
 	trimmedSecret = strings.ToUpper(strings.TrimSpace(trimmedSecret))
 	trimmedSecret = strings.TrimRight(trimmedSecret, "=")
 	if trimmedSecret == "" {
-		return nil, E.New("openconnect OATH software token requires a base32 secret")
+		return nil, E.New("OATH software token requires a base32 secret")
 	}
 	decodedSecret, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(trimmedSecret)
 	if err != nil {
 		return nil, E.Cause(err, "decode openconnect OATH base32 secret")
 	}
 	if len(decodedSecret) == 0 {
-		return nil, E.New("openconnect OATH software token secret is empty")
+		return nil, E.New("OATH software token secret is empty")
 	}
 	return decodedSecret, nil
 }
 
 func generateHOTPCodeAndPersist(ctx context.Context, options *TokenOptions) (string, error) {
 	if options.UpdateCounter == nil {
-		return "", E.New("openconnect HOTP token requires an update counter callback")
+		return "", E.New("HOTP token requires an update counter callback")
 	}
 	configuration, err := parseOATHConfiguration(options.Secret, TokenModeHOTP)
 	if err != nil {
@@ -279,7 +279,7 @@ func generateHOTPCodeAndPersist(ctx context.Context, options *TokenOptions) (str
 		return "", err
 	}
 	if counter == math.MaxUint64 {
-		return "", E.New("openconnect HOTP counter is exhausted")
+		return "", E.New("HOTP counter is exhausted")
 	}
 	nextCounter := counter + 1
 	err = options.UpdateCounter(ctx, nextCounter)

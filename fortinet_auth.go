@@ -99,9 +99,27 @@ type fortinetSessionSnapshot struct {
 
 func (f *fortinetFrontend) BeginAuthentication() authContinuation {
 	f.client.httpTransport.CloseIdleConnections()
+	serverURL := cloneFortinetURL(f.client.serverURL)
+	directCookie := f.client.takeDirectCookie()
+	if directCookie != "" {
+		jar, values, directErr := newDirectCookieJar(serverURL, directCookie, "SVPNCOOKIE")
+		svpnCookie := values["SVPNCOOKIE"]
+		if directErr == nil && svpnCookie == "" {
+			directErr = E.New("direct cookie does not contain SVPNCOOKIE")
+		}
+		return &completedAuthentication{
+			session: &fortinetSessionState{
+				frontend:   f,
+				serverURL:  serverURL,
+				jar:        jar,
+				svpnCookie: svpnCookie,
+			},
+			err: directErr,
+		}
+	}
 	jar, initializationErr := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
 	authenticationClient := &http.Client{
-		Transport: f.client.httpTransport,
+		Transport: f.client.wrapHTTPTransport(f.client.httpTransport),
 		Jar:       jar,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -112,7 +130,7 @@ func (f *fortinetFrontend) BeginAuthentication() authContinuation {
 		initializationErr: initializationErr,
 		httpClient:        authenticationClient,
 		jar:               jar,
-		currentURL:        cloneFortinetURL(f.client.serverURL),
+		currentURL:        serverURL,
 		tokenGenerator:    newSoftwareTokenGenerator(f.client.options.Token),
 	}
 }
@@ -160,11 +178,11 @@ func (a *fortinetAuthentication) Advance(
 	}
 	if a.completed {
 		a.access.Unlock()
-		return nil, nil, E.Extend(ErrProtocolNotSupported, "Fortinet authentication continuation is already complete")
+		return nil, nil, E.Extend(ErrProtocolNotSupported, "authentication continuation is already complete")
 	}
 	if a.advancing {
 		a.access.Unlock()
-		return nil, nil, E.Extend(ErrProtocolNotSupported, "Fortinet authentication continuation is already advancing")
+		return nil, nil, E.Extend(ErrProtocolNotSupported, "authentication continuation is already advancing")
 	}
 	a.advancing = true
 	started := a.started
@@ -231,7 +249,7 @@ func (a *fortinetAuthentication) beginAuthentication(
 	currentURL := cloneFortinetURL(a.currentURL)
 	for redirectNumber := 0; ; redirectNumber++ {
 		if redirectNumber > fortinetMaximumAuthenticationRedirects {
-			return nil, nil, markTerminal(E.New("Fortinet authentication exceeded ", fortinetMaximumAuthenticationRedirects, " redirects"))
+			return nil, nil, markTerminal(E.New("authentication exceeded ", fortinetMaximumAuthenticationRedirects, " redirects"))
 		}
 		httpResponse, requestErr := a.doAuthenticationRequest(ctx, http.MethodGet, currentURL, "")
 		if requestErr != nil {
@@ -277,7 +295,7 @@ func (a *fortinetAuthentication) beginAuthentication(
 			return a.beginSAMLAuthentication(httpResponse.requestURL)
 		}
 		if httpResponse.statusCode < http.StatusOK || httpResponse.statusCode >= http.StatusMultipleChoices {
-			return nil, nil, markTerminal(E.New("Fortinet login page returned HTTP ", httpResponse.statusCode))
+			return nil, nil, markTerminal(E.New("login page returned HTTP ", httpResponse.statusCode))
 		}
 		realm := httpResponse.requestURL.Query().Get("realm")
 		form := staticFortinetAuthenticationForm()
@@ -327,7 +345,7 @@ func (a *fortinetAuthentication) processAuthenticationResponse(
 			realm := a.realm
 			a.access.Unlock()
 			if currentURL == nil {
-				return nil, nil, markTerminal(E.New("Fortinet authentication endpoint is empty"))
+				return nil, nil, markTerminal(E.New("authentication endpoint is empty"))
 			}
 			currentURL.Path = "/remote/saml/start"
 			currentURL.RawPath = ""
@@ -378,11 +396,11 @@ func (a *fortinetAuthentication) processAuthenticationResponse(
 	default:
 		if isFortinetRedirectStatus(httpResponse.statusCode) || httpResponse.statusCode == http.StatusForbidden {
 			if previousInitial {
-				return nil, nil, newRetryableAuthenticationError(E.New("Fortinet gateway rejected the primary credentials"), authCachePassword)
+				return nil, nil, newRetryableAuthenticationError(E.New("gateway rejected the primary credentials"), authCachePassword)
 			}
-			return nil, nil, E.New("Fortinet gateway rejected the authentication continuation")
+			return nil, nil, E.New("gateway rejected the authentication continuation")
 		}
-		return nil, nil, markTerminal(E.New("Fortinet logincheck returned HTTP ", httpResponse.statusCode))
+		return nil, nil, markTerminal(E.New("logincheck returned HTTP ", httpResponse.statusCode))
 	}
 }
 
@@ -395,7 +413,7 @@ func (a *fortinetAuthentication) beginSAMLAuthentication(browserURL *url.URL) (o
 	currentURL := cloneFortinetURL(a.currentURL)
 	if currentURL == nil || !equalFortinetEndpoint(currentURL, browserURL) {
 		a.access.Unlock()
-		return nil, nil, markTerminal(E.New("Fortinet SAML authentication changed the accepted origin"))
+		return nil, nil, markTerminal(E.New("SAML authentication changed the accepted origin"))
 	}
 	browserURL = cloneFortinetURL(browserURL)
 	query := browserURL.Query()
@@ -423,7 +441,7 @@ func (a *fortinetAuthentication) completeSAMLAuthentication(result *BrowserResul
 	jar := a.jar
 	a.access.Unlock()
 	if currentURL == nil || jar == nil {
-		return nil, nil, markTerminal(E.New("Fortinet SAML authentication state is unavailable"))
+		return nil, nil, markTerminal(E.New("SAML authentication state is unavailable"))
 	}
 	if result.FinalURL != "" {
 		finalURL, parseErr := url.Parse(result.FinalURL)
@@ -431,7 +449,7 @@ func (a *fortinetAuthentication) completeSAMLAuthentication(result *BrowserResul
 			return nil, nil, E.Errors(ErrInvalidBrowserAuthentication, E.Cause(parseErr, "parse Fortinet SAML final URL"))
 		}
 		if !equalFortinetEndpoint(currentURL, finalURL) {
-			return nil, nil, E.Errors(ErrInvalidBrowserAuthentication, E.New("Fortinet SAML browser completed on an unexpected origin"))
+			return nil, nil, E.Errors(ErrInvalidBrowserAuthentication, E.New("SAML browser completed on an unexpected origin"))
 		}
 	}
 	var svpnCookie string
@@ -442,7 +460,7 @@ func (a *fortinetAuthentication) completeSAMLAuthentication(result *BrowserResul
 		}
 	}
 	if svpnCookie == "" {
-		return nil, nil, E.Errors(ErrInvalidBrowserAuthentication, E.New("Fortinet SAML browser result omitted SVPNCOOKIE"))
+		return nil, nil, E.Errors(ErrInvalidBrowserAuthentication, E.New("SAML browser result omitted SVPNCOOKIE"))
 	}
 	jar.SetCookies(currentURL, []*http.Cookie{{
 		Name:     "SVPNCOOKIE",
@@ -456,7 +474,7 @@ func (a *fortinetAuthentication) completeSAMLAuthentication(result *BrowserResul
 		return nil, nil, cookieErr
 	}
 	if state == nil {
-		return nil, nil, E.Errors(ErrInvalidBrowserAuthentication, E.New("Fortinet SAML browser cookie was not accepted"))
+		return nil, nil, E.Errors(ErrInvalidBrowserAuthentication, E.New("SAML browser cookie was not accepted"))
 	}
 	a.access.Lock()
 	a.completed = true
@@ -521,7 +539,7 @@ func (a *fortinetAuthentication) authenticationPostURL(form *fortinetAuthenticat
 	currentURL := cloneFortinetURL(a.currentURL)
 	a.access.Unlock()
 	if currentURL == nil {
-		return nil, markTerminal(E.New("Fortinet authentication endpoint is empty"))
+		return nil, markTerminal(E.New("authentication endpoint is empty"))
 	}
 	requestURL := cloneFortinetURL(currentURL)
 	requestURL.Path = "/remote/logincheck"
@@ -533,7 +551,7 @@ func (a *fortinetAuthentication) authenticationPostURL(form *fortinetAuthenticat
 			return nil, markTerminal(E.Cause(resolveErr, "resolve Fortinet HTML challenge action"))
 		}
 		if !equalFortinetEndpoint(currentURL, resolvedURL) {
-			return nil, markTerminal(E.New("Fortinet HTML challenge action changed the accepted origin"))
+			return nil, markTerminal(E.New("HTML challenge action changed the accepted origin"))
 		}
 		requestURL = resolvedURL
 	}
@@ -555,7 +573,7 @@ func (a *fortinetAuthentication) doAuthenticationRequest(
 	requestNumber := a.requests
 	a.access.Unlock()
 	if requestNumber > fortinetMaximumAuthenticationRequests {
-		return fortinetHTTPResponse{}, markTerminal(E.New("Fortinet authentication exceeded ", fortinetMaximumAuthenticationRequests, " wire requests"))
+		return fortinetHTTPResponse{}, markTerminal(E.New("authentication exceeded ", fortinetMaximumAuthenticationRequests, " wire requests"))
 	}
 	var body io.Reader
 	if method == http.MethodPost {
@@ -597,7 +615,7 @@ func (a *fortinetAuthentication) doAuthenticationRequest(
 		return fortinetHTTPResponse{}, E.Cause(closeErr, "close Fortinet authentication response")
 	}
 	if len(responseBody) > fortinetMaximumAuthenticationBody {
-		return fortinetHTTPResponse{}, markTerminal(E.New("Fortinet authentication response exceeds ", fortinetMaximumAuthenticationBody, " bytes"))
+		return fortinetHTTPResponse{}, markTerminal(E.New("authentication response exceeds ", fortinetMaximumAuthenticationBody, " bytes"))
 	}
 	return fortinetHTTPResponse{
 		statusCode: response.StatusCode,
@@ -657,7 +675,7 @@ func (a *fortinetAuthentication) sessionFromCookies(requestURL *url.URL) (*forti
 		return nil, nil
 	}
 	if !acceptedAddress.IsValid() {
-		return nil, markTerminal(E.New("Fortinet authenticated endpoint has no accepted peer address"))
+		return nil, markTerminal(E.New("authenticated endpoint has no accepted peer address"))
 	}
 	return &fortinetSessionState{
 		frontend:        a.frontend,
@@ -694,7 +712,7 @@ func parseFortinetTopLocation(content []byte) (string, bool, error) {
 				return "", false, E.Cause(unquoteErr, "decode Fortinet JavaScript redirect")
 			}
 			if location == "" {
-				return "", false, E.New("Fortinet JavaScript redirect is empty")
+				return "", false, E.New("JavaScript redirect is empty")
 			}
 			return location, true, nil
 		}
@@ -734,18 +752,18 @@ func equalFortinetEndpoint(left *url.URL, right *url.URL) bool {
 
 func fortinetURLPort(serverURL *url.URL) (uint16, error) {
 	if serverURL == nil {
-		return 0, E.New("Fortinet endpoint URL is empty")
+		return 0, E.New("endpoint URL is empty")
 	}
 	portText := serverURL.Port()
 	if portText == "" {
 		if strings.EqualFold(serverURL.Scheme, "https") {
 			return 443, nil
 		}
-		return 0, E.New("Fortinet endpoint has no port")
+		return 0, E.New("endpoint has no port")
 	}
 	port, parseErr := strconv.ParseUint(portText, 10, 16)
 	if parseErr != nil || port == 0 {
-		return 0, E.New("Fortinet endpoint has an invalid port: ", portText)
+		return 0, E.New("endpoint has an invalid port: ", portText)
 	}
 	return uint16(port), nil
 }
@@ -798,7 +816,7 @@ func (s *fortinetSessionState) attachSession(session *pppSession) error {
 		return ErrSessionRejected
 	}
 	if s.activeSession != nil && s.activeSession != session {
-		return E.New("Fortinet obtained session already owns an active tunnel")
+		return E.New("obtained session already owns an active tunnel")
 	}
 	s.activeSession = session
 	return nil
@@ -853,7 +871,7 @@ func (f *fortinetFrontend) logout(ctx context.Context, snapshot fortinetSessionS
 	logoutURL.Path = "/remote/logout"
 	logoutURL.RawPath = ""
 	logoutURL.RawQuery = ""
-	logoutClient, transport, clientErr := f.newPinnedHTTPClient(snapshot)
+	logoutClient, transport, _, clientErr := f.newPinnedHTTPClient(snapshot)
 	if clientErr != nil {
 		return clientErr
 	}
@@ -877,20 +895,20 @@ func (f *fortinetFrontend) logout(ctx context.Context, snapshot fortinetSessionS
 		return E.Cause(closeErr, "close Fortinet logout response")
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return E.New("Fortinet logout returned HTTP ", response.StatusCode)
+		return E.New("logout returned HTTP ", response.StatusCode)
 	}
 	return nil
 }
 
 func (f *fortinetFrontend) newPinnedHTTPClient(
 	snapshot fortinetSessionSnapshot,
-) (*http.Client, *http.Transport, error) {
-	if snapshot.serverURL == nil || !snapshot.acceptedAddress.IsValid() || snapshot.jar == nil {
-		return nil, nil, E.New("Fortinet accepted endpoint is incomplete")
+) (*http.Client, *http.Transport, *pinnedHTTPPeer, error) {
+	if snapshot.serverURL == nil || snapshot.jar == nil {
+		return nil, nil, nil, E.New("accepted endpoint is incomplete")
 	}
 	expectedPort, portErr := fortinetURLPort(snapshot.serverURL)
 	if portErr != nil {
-		return nil, nil, portErr
+		return nil, nil, nil, portErr
 	}
 	f.client.httpTransport.CloseIdleConnections()
 	return newPinnedHTTPClient(f.client, snapshot.serverURL, snapshot.acceptedAddress, snapshot.jar, expectedPort, "Fortinet")

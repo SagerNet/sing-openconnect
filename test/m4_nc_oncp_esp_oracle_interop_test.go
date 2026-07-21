@@ -41,6 +41,7 @@ type m4NCESPOraclePeer struct {
 	tunnelClosed         chan struct{}
 	logout               chan struct{}
 	logoutOnce           sync.Once
+	tunnelStarted        atomic.Bool
 	serverSPI            uint32
 	serverEncryption     []byte
 	serverAuthentication []byte
@@ -118,6 +119,7 @@ func TestM4NetworkConnectONCPESPOracleInterop(t *testing.T) {
 		t.Fatal(E.Cause(err, "create Network Connect ESP oracle client"))
 	}
 	t.Cleanup(func() { _ = client.Close() })
+	activeTransportUpdated := client.ActiveTransportUpdated()
 	err = client.Start()
 	if err != nil {
 		t.Fatal(E.Cause(err, "start Network Connect ESP oracle client"))
@@ -135,6 +137,9 @@ func TestM4NetworkConnectONCPESPOracleInterop(t *testing.T) {
 		t.Fatal(peerErr)
 	case <-ctx.Done():
 		t.Fatal(E.Cause(ctx.Err(), "wait for Network Connect ESP oracle enable"))
+	}
+	if client.ActiveTransport() != openconnect.TransportESP {
+		waitForActiveTransportUpdate(t, ctx, client, activeTransportUpdated, openconnect.TransportESP)
 	}
 	clientAddress := netip.MustParseAddr("10.47.0.10")
 	serverAddress := netip.MustParseAddr("10.47.0.1")
@@ -253,6 +258,10 @@ func (p *m4NCESPOraclePeer) serve(writer http.ResponseWriter, request *http.Requ
 }
 
 func (p *m4NCESPOraclePeer) serveTunnel(writer http.ResponseWriter) {
+	if !p.tunnelStarted.CompareAndSwap(false, true) {
+		p.fail(writer, E.New("Network Connect ESP oracle received an unsupported second tunnel"))
+		return
+	}
 	hijacker, loaded := writer.(http.Hijacker)
 	if !loaded {
 		p.fail(writer, E.New("Network Connect ESP oracle cannot hijack TLS"))

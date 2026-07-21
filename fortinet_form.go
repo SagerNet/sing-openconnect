@@ -59,18 +59,18 @@ func staticFortinetAuthenticationForm() *fortinetAuthenticationForm {
 func parseFortinetTokenInfo(content []byte, username string) (*fortinetAuthenticationForm, error) {
 	trimmed := strings.TrimSpace(string(content))
 	if !strings.HasPrefix(trimmed, "ret=") {
-		return nil, E.New("Fortinet tokeninfo response does not begin with ret")
+		return nil, E.New("tokeninfo response does not begin with ret")
 	}
 	segments := strings.Split(trimmed, ",")
 	if len(segments) > fortinetMaximumTokenInfoFields {
-		return nil, E.New("Fortinet tokeninfo response has too many fields")
+		return nil, E.New("tokeninfo response has too many fields")
 	}
 	values := make(map[string]string, len(segments))
 	rawPairs := make(map[string]string, len(segments))
 	orderedOpaqueNames := make([]string, 0, len(segments))
 	for _, segment := range segments {
 		if len(segment) > fortinetMaximumTokenInfoField {
-			return nil, E.New("Fortinet tokeninfo field exceeds ", fortinetMaximumTokenInfoField, " bytes")
+			return nil, E.New("tokeninfo field exceeds ", fortinetMaximumTokenInfoField, " bytes")
 		}
 		name, value, loaded := strings.Cut(segment, "=")
 		if !loaded || name == "" {
@@ -88,7 +88,7 @@ func parseFortinetTokenInfo(content []byte, username string) (*fortinetAuthentic
 	}
 	tokenInfo, loaded := values["tokeninfo"]
 	if !loaded {
-		return nil, E.New("Fortinet challenge omitted tokeninfo")
+		return nil, E.New("challenge omitted tokeninfo")
 	}
 	formID := "_challenge"
 	form := &fortinetAuthenticationForm{
@@ -145,11 +145,11 @@ func parseFortinetHTMLChallenge(content []byte) (*fortinetAuthenticationForm, er
 	}
 	formNode := findFortinetHTMLNode(document, "form")
 	if formNode == nil {
-		return nil, E.New("Fortinet HTTP 401 response has no HTML form")
+		return nil, E.New("HTTP 401 response has no HTML form")
 	}
 	method := strings.ToUpper(strings.TrimSpace(fortinetHTMLAttribute(formNode, "method")))
 	if method != "POST" {
-		return nil, E.New("Fortinet HTML challenge form is not POST")
+		return nil, E.New("HTML challenge form is not POST")
 	}
 	formID := strings.TrimSpace(fortinetHTMLAttribute(formNode, "id"))
 	if formID == "" {
@@ -186,7 +186,7 @@ func parseFortinetHTMLChallenge(content []byte) (*fortinetAuthenticationForm, er
 			}
 			name := strings.TrimSpace(fortinetHTMLAttribute(node, "name"))
 			if name == "" {
-				return E.New("Fortinet HTML challenge input has no name")
+				return E.New("HTML challenge input has no name")
 			}
 			form.fields = append(form.fields, fortinetAuthenticationField{
 				submissionKey: fortinetSubmissionKey(formID, len(form.fields)),
@@ -219,7 +219,7 @@ func parseFortinetHTMLChallenge(content []byte) (*fortinetAuthenticationForm, er
 		}
 	}
 	if !usernameFound || !credentialFound {
-		return nil, E.New("Fortinet HTML challenge omitted hidden username or credential input")
+		return nil, E.New("HTML challenge omitted hidden username or credential input")
 	}
 	return form, nil
 }
@@ -231,7 +231,7 @@ func encodeFortinetAuthenticationResponse(
 	initial bool,
 ) (string, string, error) {
 	if form == nil || response == nil {
-		return "", "", E.New("Fortinet authentication form response is empty")
+		return "", "", E.New("authentication form response is empty")
 	}
 	code := ""
 	formFields := make([]string, 0, len(form.fields)+1)
@@ -240,7 +240,7 @@ func encodeFortinetAuthenticationResponse(
 	for _, field := range form.fields {
 		value, loaded := response.Values[field.submissionKey]
 		if !loaded {
-			return "", "", E.Extend(ErrProtocolNotSupported, "Fortinet authentication response omitted field ", field.name)
+			return "", "", E.Extend(ErrProtocolNotSupported, "authentication response omitted field ", field.name)
 		}
 		if field.name == "code" {
 			code = value

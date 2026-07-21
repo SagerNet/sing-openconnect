@@ -124,7 +124,14 @@ func readPulseConfiguration(
 	}
 	if !accumulator.mainSeen || accumulator.configuration.MTU == 0 || (!accumulator.assignedIPv4.IsValid() && !accumulator.assignedIPv6.IsValid()) {
 		destroyPulseESPConfiguration(espConfiguration)
-		return nil, markTerminal(E.New("Pulse server returned insufficient tunnel configuration"))
+		return nil, markTerminal(E.New("server returned insufficient tunnel configuration"))
+	}
+	if client.options.IPv6Disabled {
+		accumulator.assignedIPv6 = netip.Addr{}
+		if !accumulator.assignedIPv4.IsValid() {
+			destroyPulseESPConfiguration(espConfiguration)
+			return nil, markTerminal(E.New("server did not provide an IPv4 tunnel address"))
+		}
 	}
 	minimumMTU := uint32(576)
 	if accumulator.assignedIPv6.IsValid() {
@@ -137,7 +144,7 @@ func readPulseConfiguration(
 	if accumulator.assignedIPv4.IsValid() {
 		if !accumulator.ipv4Netmask.IsValid() {
 			destroyPulseESPConfiguration(espConfiguration)
-			return nil, markTerminal(E.New("Pulse IPv4 configuration omitted its netmask"))
+			return nil, markTerminal(E.New("IPv4 configuration omitted its netmask"))
 		}
 		prefix, err := pulseIPv4AddressPrefix(accumulator.assignedIPv4, accumulator.ipv4Netmask)
 		if err != nil {
@@ -146,6 +153,11 @@ func readPulseConfiguration(
 		}
 		accumulator.configuration.Addresses = append(accumulator.configuration.Addresses, prefix)
 	}
+	accumulator.configuration.RemoteAddress = acceptedAddress.Unmap()
+	accumulator.configuration = normalizeTunnelConfiguration(
+		accumulator.configuration,
+		client.options.IPv6Disabled,
+	)
 	return &pulseTunnelConfiguration{
 		configuration: accumulator.configuration,
 		assignedIPv4:  accumulator.assignedIPv4,
@@ -178,7 +190,7 @@ func parsePulseMainConfiguration(
 	if identifier == 0x2e20f000 {
 		for {
 			if len(section)-offset < 8 {
-				return E.New("Pulse leading configuration attributes are truncated")
+				return E.New("leading configuration attributes are truncated")
 			}
 			attributeFlag := binary.BigEndian.Uint16(section[offset : offset+2])
 			attributeLength := int(binary.BigEndian.Uint16(section[offset+2 : offset+4]))
@@ -196,7 +208,7 @@ func parsePulseMainConfiguration(
 		}
 	}
 	if len(section)-offset < 8 || binary.BigEndian.Uint16(section[offset:offset+2]) != 0x2e00 {
-		return E.New("Pulse configuration omitted its routing block")
+		return E.New("configuration omitted its routing block")
 	}
 	routingLength := int(binary.BigEndian.Uint16(section[offset+2 : offset+4]))
 	routeCount := int(section[offset+4])
@@ -213,11 +225,11 @@ func parsePulseMainConfiguration(
 	}
 	offset += routingLength
 	if len(section)-offset < 8 {
-		return E.New("Pulse final configuration attributes are truncated")
+		return E.New("final configuration attributes are truncated")
 	}
 	attributeLength := int(binary.BigEndian.Uint32(section[offset : offset+4]))
 	if attributeLength != len(section)-offset {
-		return E.New("Pulse final attribute block length mismatch")
+		return E.New("final attribute block length mismatch")
 	}
 	err := parsePulseAttributeBlock(ctx, client, section[offset:], accumulator)
 	if err != nil {
@@ -239,12 +251,12 @@ func parsePulseAttributeBlock(
 	content = content[8:]
 	for len(content) > 0 {
 		if len(content) < 4 {
-			return E.New("Pulse attribute stream ended inside a header")
+			return E.New("attribute stream ended inside a header")
 		}
 		attributeType := binary.BigEndian.Uint16(content[0:2])
 		attributeLength := int(binary.BigEndian.Uint16(content[2:4]))
 		if attributeLength > len(content)-4 {
-			return E.New("Pulse attribute exceeds its containing block")
+			return E.New("attribute exceeds its containing block")
 		}
 		err := applyPulseAttribute(ctx, client, accumulator, attributeType, content[4:4+attributeLength])
 		if err != nil {
@@ -269,7 +281,7 @@ func applyPulseAttribute(
 			return err
 		}
 		if address.IsUnspecified() || address.IsMulticast() {
-			return E.New("Pulse assigned IPv4 address is unusable")
+			return E.New("assigned IPv4 address is unusable")
 		}
 		accumulator.assignedIPv4 = address
 	case 0x0002:
@@ -284,7 +296,7 @@ func applyPulseAttribute(
 			return err
 		}
 		if address.IsUnspecified() {
-			return E.New("Pulse IPv4 DNS server is unspecified")
+			return E.New("IPv4 DNS server is unspecified")
 		}
 		if len(accumulator.configuration.DNS) < 3 {
 			accumulator.configuration.DNS = append(accumulator.configuration.DNS, address)
@@ -295,39 +307,48 @@ func applyPulseAttribute(
 			return err
 		}
 		if address.IsUnspecified() {
-			return E.New("Pulse IPv4 NBNS server is unspecified")
+			return E.New("IPv4 NBNS server is unspecified")
 		}
 		if len(accumulator.configuration.NBNS) < 3 {
 			accumulator.configuration.NBNS = append(accumulator.configuration.NBNS, address)
 		}
 	case 0x0008:
+		if client.options.IPv6Disabled {
+			return nil
+		}
 		if len(content) != 17 || content[16] > 128 {
-			return E.New("Pulse IPv6 address attribute has invalid length or prefix")
+			return E.New("IPv6 address attribute has invalid length or prefix")
 		}
 		address := netip.AddrFrom16([16]byte(content[:16]))
 		if address.Is4In6() || address.IsUnspecified() || address.IsMulticast() {
-			return E.New("Pulse assigned IPv6 address is unusable")
+			return E.New("assigned IPv6 address is unusable")
 		}
 		accumulator.assignedIPv6 = address
 		accumulator.configuration.Addresses = append(accumulator.configuration.Addresses, netip.PrefixFrom(address, int(content[16])))
 	case 0x000a:
+		if client.options.IPv6Disabled {
+			return nil
+		}
 		if len(content) != 16 {
-			return E.New("Pulse IPv6 DNS attribute has invalid length")
+			return E.New("IPv6 DNS attribute has invalid length")
 		}
 		address := netip.AddrFrom16([16]byte(content))
 		if address.Is4In6() || address.IsUnspecified() {
-			return E.New("Pulse IPv6 DNS server is unusable")
+			return E.New("IPv6 DNS server is unusable")
 		}
 		if len(accumulator.configuration.DNS) < 3 {
 			accumulator.configuration.DNS = append(accumulator.configuration.DNS, address)
 		}
 	case 0x000f, 0x0010:
+		if client.options.IPv6Disabled {
+			return nil
+		}
 		if len(content) != 17 || content[16] > 128 {
-			return E.New("Pulse IPv6 route attribute has invalid length or prefix")
+			return E.New("IPv6 route attribute has invalid length or prefix")
 		}
 		address := netip.AddrFrom16([16]byte(content[:16]))
 		if address.Is4In6() {
-			return E.New("Pulse IPv6 route contains an IPv4-mapped address")
+			return E.New("IPv6 route contains an IPv4-mapped address")
 		}
 		prefix := netip.PrefixFrom(address, int(content[16])).Masked()
 		route := TunnelRoute{Prefix: prefix}
@@ -338,12 +359,12 @@ func applyPulseAttribute(
 		}
 	case 0x4005:
 		if len(content) != 4 {
-			return E.New("Pulse MTU attribute has invalid length")
+			return E.New("MTU attribute has invalid length")
 		}
 		accumulator.configuration.MTU = binary.BigEndian.Uint32(content)
 	case 0x4006:
 		if len(content) == 0 {
-			return E.New("Pulse search domain attribute is empty")
+			return E.New("search domain attribute is empty")
 		}
 		if content[len(content)-1] == 0 {
 			content = content[:len(content)-1]
@@ -353,7 +374,7 @@ func applyPulseAttribute(
 		}
 	case 0x4010:
 		if len(content) != 2 {
-			return E.New("Pulse ESP encryption attribute has invalid length")
+			return E.New("ESP encryption attribute has invalid length")
 		}
 		switch binary.BigEndian.Uint16(content) {
 		case 2:
@@ -365,7 +386,7 @@ func applyPulseAttribute(
 		}
 	case 0x4011:
 		if len(content) != 2 {
-			return E.New("Pulse ESP authentication attribute has invalid length")
+			return E.New("ESP authentication attribute has invalid length")
 		}
 		switch binary.BigEndian.Uint16(content) {
 		case 1:
@@ -379,26 +400,26 @@ func applyPulseAttribute(
 		}
 	case 0x4012, 0x4013:
 		if len(content) != 4 {
-			return E.New("Pulse ESP lifetime attribute has invalid length")
+			return E.New("ESP lifetime attribute has invalid length")
 		}
 	case 0x4014:
 		if len(content) != 4 {
-			return E.New("Pulse ESP replay attribute has invalid length")
+			return E.New("ESP replay attribute has invalid length")
 		}
 		accumulator.espReplay = binary.BigEndian.Uint32(content) != 0
 	case 0x4016:
 		if len(content) != 2 {
-			return E.New("Pulse ESP port attribute has invalid length")
+			return E.New("ESP port attribute has invalid length")
 		}
 		accumulator.espPort = binary.BigEndian.Uint16(content)
 	case 0x4017:
 		if len(content) != 4 {
-			return E.New("Pulse ESP fallback attribute has invalid length")
+			return E.New("ESP fallback attribute has invalid length")
 		}
 		accumulator.espFallback = time.Duration(binary.BigEndian.Uint32(content)) * time.Second
 	case 0x401a, 0x4024:
 		if len(content) != 1 {
-			return E.New("Pulse ESP flag attribute has invalid length")
+			return E.New("ESP flag attribute has invalid length")
 		}
 		if attributeType == 0x4024 {
 			accumulator.espCrossFamily = content[0] != 0
@@ -426,7 +447,7 @@ func parsePulseIPv4Route(content []byte, accumulator *pulseConfigurationAccumula
 		expectedMask = ^uint32(0) << (32 - prefixBits)
 	}
 	if mask != expectedMask || start&mask != start || start|hostMask != end {
-		return E.New("Pulse IPv4 route range is not a CIDR prefix")
+		return E.New("IPv4 route range is not a CIDR prefix")
 	}
 	var addressBytes [4]byte
 	binary.BigEndian.PutUint32(addressBytes[:], start)
@@ -444,7 +465,7 @@ func parsePulseIPv4Route(content []byte, accumulator *pulseConfigurationAccumula
 
 func pulseIPv4Attribute(content []byte, description string) (netip.Addr, error) {
 	if len(content) != 4 {
-		return netip.Addr{}, E.New("Pulse ", description, " attribute has invalid length")
+		return netip.Addr{}, E.New(description, " attribute has invalid length")
 	}
 	return netip.AddrFrom4([4]byte(content)), nil
 }
@@ -454,7 +475,7 @@ func pulseIPv4AddressPrefix(address netip.Addr, netmask netip.Addr) (netip.Prefi
 	maskBytes := netmask.As4()
 	prefixBits, bitLength := net.IPMask(maskBytes[:]).Size()
 	if bitLength != 32 {
-		return netip.Prefix{}, E.New("Pulse IPv4 netmask is not contiguous")
+		return netip.Prefix{}, E.New("IPv4 netmask is not contiguous")
 	}
 	return netip.PrefixFrom(netip.AddrFrom4(addressBytes), prefixBits), nil
 }
@@ -468,12 +489,12 @@ func parsePulseESPConfiguration(
 		return nil, nil, E.New("invalid Pulse ESP configuration frame")
 	}
 	if len(payload) < 42+64 || accumulator.espEncryption.keyLength() == 0 || accumulator.espAuthentication.keyLength() == 0 || accumulator.espPort == 0 {
-		return nil, nil, E.New("Pulse ESP configuration omitted usable algorithms, keys, or port")
+		return nil, nil, E.New("ESP configuration omitted usable algorithms, keys, or port")
 	}
 	encryptionKeyLength := accumulator.espEncryption.keyLength()
 	authenticationKeyLength := accumulator.espAuthentication.keyLength()
 	if encryptionKeyLength+authenticationKeyLength > 64 {
-		return nil, nil, E.New("Pulse ESP key lengths exceed the 64-byte secret block")
+		return nil, nil, E.New("ESP key lengths exceed the 64-byte secret block")
 	}
 	serverSPI := binary.LittleEndian.Uint32(payload[36:40])
 	serverEncryptionKey := append([]byte(nil), payload[42:42+encryptionKeyLength]...)

@@ -41,6 +41,7 @@ type m1DTLS09HelloVerifyDialer struct {
 type m1DTLS09HelloVerifyPeer struct {
 	ctx              context.Context
 	sessionID        []byte
+	cipherSuite      string
 	containerName    string
 	dialer           *m1DTLS09HelloVerifyDialer
 	failures         chan error
@@ -52,167 +53,180 @@ type m1DTLS09HelloVerifyPeer struct {
 	cstpDataPackets  atomic.Uint64
 }
 
-// OpenConnect bad_dtls_test.c at 2035601b64a5360a46d18e08937e7f654b3230f2 is the sole wire oracle for this peer.
+// OpenConnect bad_dtls_test.c at 2035601b64a5360a46d18e08937e7f654b3230f2 defines the Cisco DTLS 0.9 wire contract; OpenConnect 9.21 openssl-dtls.c defines the retained DES-CBC-SHA suite.
 func TestM1AnyConnectDTLS09HelloVerifyInterop(t *testing.T) {
 	t.Parallel()
 	if testing.Short() || !interopEnabled() {
 		t.Skip(openConnectInteropEnvironment + " is not set")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	t.Cleanup(cancel)
-	_, err := dockerOutput(
+	_, buildErr := dockerOutput(
 		ctx,
 		"build", "--pull=false", "--tag", m1DTLS09HelloVerifyImage,
 		filepath.Join("testdata", "dtls09-helloverify"),
 	)
-	if err != nil {
-		t.Fatal(err)
+	if buildErr != nil {
+		t.Fatal(buildErr)
 	}
-	sessionID := make([]byte, 32)
-	_, err = rand.Read(sessionID)
-	if err != nil {
-		t.Fatal(E.Cause(err, "generate DTLS0.9 HelloVerify session ID"))
-	}
-	dialer := new(m1DTLS09HelloVerifyDialer)
-	peer := &m1DTLS09HelloVerifyPeer{
-		ctx:           ctx,
-		sessionID:     sessionID,
-		containerName: "sing-openconnect-dtls09-helloverify-" + strconv.FormatInt(time.Now().UnixNano(), 10),
-		dialer:        dialer,
-		failures:      make(chan error, 8),
-		cstpStarted:   make(chan struct{}, 1),
-		cstpClosed:    make(chan error, 1),
-	}
-	t.Cleanup(func() {
-		peer.containerAccess.Lock()
-		containerStarted := peer.containerStarted
-		peer.containerAccess.Unlock()
-		if !containerStarted {
-			return
-		}
-		if t.Failed() {
-			logsContext, cancelLogs := context.WithTimeout(context.Background(), 5*time.Second)
-			logs, logsErr := dockerOutput(logsContext, "logs", peer.containerName)
-			cancelLogs()
-			if logsErr == nil {
-				t.Log("DTLS0.9 HelloVerify oracle logs:\n" + logs)
+	for _, testCase := range []struct {
+		name                string
+		cipherSuite         string
+		allowInsecureCrypto bool
+	}{
+		{name: "aes128", cipherSuite: "AES128-SHA"},
+		{name: "single-des-opt-in", cipherSuite: "DES-CBC-SHA", allowInsecureCrypto: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			sessionID := make([]byte, 32)
+			_, err := rand.Read(sessionID)
+			if err != nil {
+				t.Fatal(E.Cause(err, "generate DTLS0.9 HelloVerify session ID"))
 			}
-		}
-		removeContext, cancelRemove := context.WithTimeout(context.Background(), 5*time.Second)
-		_, _ = dockerOutput(removeContext, "rm", "--force", peer.containerName)
-		cancelRemove()
-	})
+			dialer := new(m1DTLS09HelloVerifyDialer)
+			peer := &m1DTLS09HelloVerifyPeer{
+				ctx:           ctx,
+				sessionID:     sessionID,
+				cipherSuite:   testCase.cipherSuite,
+				containerName: "sing-openconnect-dtls09-helloverify-" + testCase.name + "-" + strconv.FormatInt(time.Now().UnixNano(), 10),
+				dialer:        dialer,
+				failures:      make(chan error, 8),
+				cstpStarted:   make(chan struct{}, 1),
+				cstpClosed:    make(chan error, 1),
+			}
+			t.Cleanup(func() {
+				peer.containerAccess.Lock()
+				containerStarted := peer.containerStarted
+				peer.containerAccess.Unlock()
+				if !containerStarted {
+					return
+				}
+				if t.Failed() {
+					logsContext, cancelLogs := context.WithTimeout(context.Background(), 5*time.Second)
+					logs, logsErr := dockerOutput(logsContext, "logs", peer.containerName)
+					cancelLogs()
+					if logsErr == nil {
+						t.Log("DTLS0.9 HelloVerify oracle logs:\n" + logs)
+					}
+				}
+				removeContext, cancelRemove := context.WithTimeout(context.Background(), 5*time.Second)
+				_, _ = dockerOutput(removeContext, "rm", "--force", peer.containerName)
+				cancelRemove()
+			})
 
-	httpsPeer := httptest.NewUnstartedServer(peer)
-	httpsPeer.EnableHTTP2 = false
-	httpsPeer.StartTLS()
-	t.Cleanup(httpsPeer.Close)
-	client, err := openconnect.NewClient(openconnect.ClientOptions{
-		Context: ctx,
-		Server:  strings.TrimPrefix(httpsPeer.URL, "https://"),
-		Flavor:  openconnect.FlavorAnyConnect,
-		Dialer:  dialer,
-		TLSConfig: openconnect.ClientTLSOptions{Config: &tls.Config{
-			InsecureSkipVerify: true,
-		}},
-	})
-	if err != nil {
-		t.Fatal(E.Cause(err, "create DTLS0.9 HelloVerify client"))
-	}
-	t.Cleanup(func() {
-		closeErr := client.Close()
-		if closeErr != nil && !E.IsClosed(closeErr) {
-			t.Error(E.Cause(closeErr, "cleanup DTLS0.9 HelloVerify client"))
-		}
-	})
-	err = client.Start()
-	if err != nil {
-		t.Fatal(E.Cause(err, "start DTLS0.9 HelloVerify client"))
-	}
-	select {
-	case <-ctx.Done():
-		t.Fatal(E.Cause(ctx.Err(), "wait for DTLS0.9 HelloVerify CSTP negotiation"))
-	case peerErr := <-peer.failures:
-		t.Fatal(peerErr)
-	case <-peer.cstpStarted:
-	}
-	waitForM1DTLS09OracleLog(t, ctx, peer, m1DTLS09HandshakeComplete)
-	for !client.Ready() {
-		select {
-		case <-ctx.Done():
-			t.Fatal(E.Cause(ctx.Err(), "wait for DTLS0.9 HelloVerify channel"))
-		case peerErr := <-peer.failures:
-			t.Fatal(peerErr)
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-	err = client.WriteDataPacket([]byte("dtls09-client-data"))
-	if err != nil {
-		t.Fatal(E.Cause(err, "write DTLS0.9 application DATA"))
-	}
-	readContext, cancelRead := context.WithTimeout(ctx, 10*time.Second)
-	payload, err := client.ReadDataPacket(readContext)
-	cancelRead()
-	if err != nil {
-		t.Fatal(E.Cause(err, "read DTLS0.9 application DATA"))
-	}
-	if string(payload) != "dtls09-server-data" {
-		t.Fatalf("unexpected DTLS0.9 server DATA: %q", payload)
-	}
-	oracleLogs := waitForM1DTLS09OracleLog(t, ctx, peer, m1DTLS09DataComplete)
-	if peer.cstpDataPackets.Load() != 0 {
-		t.Fatalf("DTLS0.9 application DATA fell back to CSTP: %d packets", peer.cstpDataPackets.Load())
-	}
-	udpDials, udpDestinations := dialer.snapshot()
-	if udpDials == 0 || uint64(len(udpDestinations)) != udpDials {
-		t.Fatalf("unexpected DTLS0.9 UDP path attempts: dials=%d destinations=%v", udpDials, udpDestinations)
-	}
-	for _, destination := range udpDestinations[1:] {
-		if destination != udpDestinations[0] {
-			t.Fatalf("DTLS0.9 retry changed negotiated UDP destination: %v", udpDestinations)
-		}
-	}
-	peer.containerAccess.Lock()
-	udpAddress := peer.udpAddress
-	peer.containerAccess.Unlock()
-	pathPosition := strings.Index(oracleLogs, m1DTLS09DataComplete)
-	pathLine := oracleLogs[pathPosition:]
-	if newlinePosition := strings.IndexByte(pathLine, '\n'); newlinePosition >= 0 {
-		pathLine = pathLine[:newlinePosition]
-	}
-	t.Log("verified real DTLS0.9 packet path: client negotiation " + udpDestinations[0].String() + " -> host " + udpAddress + " -> oracle " + pathLine)
-	closeErr := client.Close()
-	if closeErr != nil && !E.IsClosed(closeErr) {
-		t.Fatal(E.Cause(closeErr, "close DTLS0.9 HelloVerify client"))
-	}
-	select {
-	case <-ctx.Done():
-		t.Fatal(E.Cause(ctx.Err(), "wait for DTLS0.9 HelloVerify CSTP close"))
-	case peerErr := <-peer.failures:
-		t.Fatal(peerErr)
-	case cstpErr := <-peer.cstpClosed:
-		if cstpErr != nil {
-			t.Fatal(cstpErr)
-		}
-	}
-	stopConnection, err := net.DialTimeout("udp", udpAddress, time.Second)
-	if err != nil {
-		t.Fatal(E.Cause(err, "connect DTLS0.9 HelloVerify oracle shutdown path"))
-	}
-	_, err = stopConnection.Write([]byte("DTLS09_STOP"))
-	closeStopErr := stopConnection.Close()
-	if err != nil {
-		t.Fatal(E.Cause(err, "write DTLS0.9 HelloVerify oracle shutdown marker"))
-	}
-	if closeStopErr != nil {
-		t.Fatal(E.Cause(closeStopErr, "close DTLS0.9 HelloVerify oracle shutdown path"))
-	}
-	waitOutput, err := dockerOutput(ctx, "wait", peer.containerName)
-	if err != nil {
-		t.Fatal(E.Cause(err, "wait for DTLS0.9 HelloVerify oracle exit"))
-	}
-	if strings.TrimSpace(waitOutput) != "0" {
-		t.Fatalf("DTLS0.9 HelloVerify oracle exited with status %s", strings.TrimSpace(waitOutput))
+			httpsPeer := httptest.NewUnstartedServer(peer)
+			httpsPeer.EnableHTTP2 = false
+			httpsPeer.StartTLS()
+			t.Cleanup(httpsPeer.Close)
+			client, err := openconnect.NewClient(openconnect.ClientOptions{
+				Context:             ctx,
+				Server:              strings.TrimPrefix(httpsPeer.URL, "https://"),
+				Flavor:              openconnect.FlavorAnyConnect,
+				Dialer:              dialer,
+				AllowInsecureCrypto: testCase.allowInsecureCrypto,
+				TLSConfig: openconnect.ClientTLSOptions{Config: &tls.Config{
+					InsecureSkipVerify: true,
+				}},
+			})
+			if err != nil {
+				t.Fatal(E.Cause(err, "create DTLS0.9 HelloVerify client"))
+			}
+			t.Cleanup(func() {
+				closeErr := client.Close()
+				if closeErr != nil && !E.IsClosed(closeErr) {
+					t.Error(E.Cause(closeErr, "cleanup DTLS0.9 HelloVerify client"))
+				}
+			})
+			err = client.Start()
+			if err != nil {
+				t.Fatal(E.Cause(err, "start DTLS0.9 HelloVerify client"))
+			}
+			select {
+			case <-ctx.Done():
+				t.Fatal(E.Cause(ctx.Err(), "wait for DTLS0.9 HelloVerify CSTP negotiation"))
+			case peerErr := <-peer.failures:
+				t.Fatal(peerErr)
+			case <-peer.cstpStarted:
+			}
+			waitForM1DTLS09OracleLog(t, ctx, peer, m1DTLS09HandshakeComplete)
+			for !client.Ready() {
+				select {
+				case <-ctx.Done():
+					t.Fatal(E.Cause(ctx.Err(), "wait for DTLS0.9 HelloVerify channel"))
+				case peerErr := <-peer.failures:
+					t.Fatal(peerErr)
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			err = client.WriteDataPacket([]byte("dtls09-client-data"))
+			if err != nil {
+				t.Fatal(E.Cause(err, "write DTLS0.9 application DATA"))
+			}
+			readContext, cancelRead := context.WithTimeout(ctx, 10*time.Second)
+			payload, err := client.ReadDataPacket(readContext)
+			cancelRead()
+			if err != nil {
+				t.Fatal(E.Cause(err, "read DTLS0.9 application DATA"))
+			}
+			if string(payload) != "dtls09-server-data" {
+				t.Fatalf("unexpected DTLS0.9 server DATA: %q", payload)
+			}
+			oracleLogs := waitForM1DTLS09OracleLog(t, ctx, peer, m1DTLS09DataComplete)
+			if peer.cstpDataPackets.Load() != 0 {
+				t.Fatalf("DTLS0.9 application DATA fell back to CSTP: %d packets", peer.cstpDataPackets.Load())
+			}
+			udpDials, udpDestinations := dialer.snapshot()
+			if udpDials == 0 || uint64(len(udpDestinations)) != udpDials {
+				t.Fatalf("unexpected DTLS0.9 UDP path attempts: dials=%d destinations=%v", udpDials, udpDestinations)
+			}
+			for _, destination := range udpDestinations[1:] {
+				if destination != udpDestinations[0] {
+					t.Fatalf("DTLS0.9 retry changed negotiated UDP destination: %v", udpDestinations)
+				}
+			}
+			peer.containerAccess.Lock()
+			udpAddress := peer.udpAddress
+			peer.containerAccess.Unlock()
+			pathPosition := strings.Index(oracleLogs, m1DTLS09DataComplete)
+			pathLine := oracleLogs[pathPosition:]
+			if newlinePosition := strings.IndexByte(pathLine, '\n'); newlinePosition >= 0 {
+				pathLine = pathLine[:newlinePosition]
+			}
+			t.Log("verified real DTLS0.9 packet path: client negotiation " + udpDestinations[0].String() + " -> host " + udpAddress + " -> oracle " + pathLine)
+			closeErr := client.Close()
+			if closeErr != nil && !E.IsClosed(closeErr) {
+				t.Fatal(E.Cause(closeErr, "close DTLS0.9 HelloVerify client"))
+			}
+			select {
+			case <-ctx.Done():
+				t.Fatal(E.Cause(ctx.Err(), "wait for DTLS0.9 HelloVerify CSTP close"))
+			case peerErr := <-peer.failures:
+				t.Fatal(peerErr)
+			case cstpErr := <-peer.cstpClosed:
+				if cstpErr != nil {
+					t.Fatal(cstpErr)
+				}
+			}
+			stopConnection, err := net.DialTimeout("udp", udpAddress, time.Second)
+			if err != nil {
+				t.Fatal(E.Cause(err, "connect DTLS0.9 HelloVerify oracle shutdown path"))
+			}
+			_, err = stopConnection.Write([]byte("DTLS09_STOP"))
+			closeStopErr := stopConnection.Close()
+			if err != nil {
+				t.Fatal(E.Cause(err, "write DTLS0.9 HelloVerify oracle shutdown marker"))
+			}
+			if closeStopErr != nil {
+				t.Fatal(E.Cause(closeStopErr, "close DTLS0.9 HelloVerify oracle shutdown path"))
+			}
+			waitOutput, err := dockerOutput(ctx, "wait", peer.containerName)
+			if err != nil {
+				t.Fatal(E.Cause(err, "wait for DTLS0.9 HelloVerify oracle exit"))
+			}
+			if strings.TrimSpace(waitOutput) != "0" {
+				t.Fatalf("DTLS0.9 HelloVerify oracle exited with status %s", strings.TrimSpace(waitOutput))
+			}
+		})
 	}
 }
 
@@ -253,13 +267,13 @@ func (p *m1DTLS09HelloVerifyPeer) serveCSTP(writer http.ResponseWriter, request 
 	}
 	cipherOffered := false
 	for _, cipherSuite := range strings.Split(request.Header.Get("X-DTLS-CipherSuite"), ":") {
-		if cipherSuite == "AES128-SHA" {
+		if cipherSuite == p.cipherSuite {
 			cipherOffered = true
 			break
 		}
 	}
 	if !cipherOffered {
-		p.fail(writer, E.New("DTLS0.9 HelloVerify client did not offer AES128-SHA"))
+		p.fail(writer, E.New("DTLS0.9 HelloVerify client did not offer ", p.cipherSuite))
 		return
 	}
 	dtlsPort, err := p.startOracle(strings.ToLower(masterSecretHex))
@@ -290,7 +304,7 @@ func (p *m1DTLS09HelloVerifyPeer) serveCSTP(writer http.ResponseWriter, request 
 		"X-DTLS-DPD: 30\r\n" +
 		"X-DTLS-Keepalive: 30\r\n" +
 		"X-DTLS-Session-ID: " + strings.ToUpper(hex.EncodeToString(p.sessionID)) + "\r\n" +
-		"X-DTLS-CipherSuite: AES128-SHA\r\n\r\n")
+		"X-DTLS-CipherSuite: " + p.cipherSuite + "\r\n\r\n")
 	if err == nil {
 		err = readWriter.Flush()
 	}
@@ -343,7 +357,7 @@ func (p *m1DTLS09HelloVerifyPeer) startOracle(masterSecretHex string) (int, erro
 		"run", "--detach", "--name", p.containerName,
 		"--publish", "127.0.0.1::4433/udp",
 		m1DTLS09HelloVerifyImage,
-		hex.EncodeToString(p.sessionID), masterSecretHex,
+		hex.EncodeToString(p.sessionID), masterSecretHex, p.cipherSuite,
 	)
 	if err != nil {
 		return 0, err

@@ -249,7 +249,8 @@ func TestM2GlobalProtectGPSTInterop(t *testing.T) {
 	dialer := &m2GPDialer{hostname: m2GPHostname, primary: peer.address}
 	configurationEvents := make(chan openconnect.TunnelConfigurationEvent, 4)
 	client := newM2GPClient(t, ctx, peer, dialer, openconnect.ClientOptions{
-		NoUDP: true,
+		NoUDP:       true,
+		DPDInterval: 2 * time.Second,
 		OnTunnelConfiguration: func(event openconnect.TunnelConfigurationEvent) error {
 			configurationEvents <- event
 			return nil

@@ -48,6 +48,9 @@ type anyConnectCSTPSession struct {
 	closeOnce           sync.Once
 	lifecycleAccess     sync.Mutex
 	writeAccess         sync.Mutex
+	compression         anyConnectCompression
+	outgoingCompression anyConnectCompression
+	deflate             *anyConnectDeflateState
 	dtlsAccess          sync.RWMutex
 	dtlsNegotiation     *cstpDTLSNegotiation
 	dtls                *anyConnectDTLSChannel
@@ -64,18 +67,32 @@ func newAnyConnectCSTPSession(
 	client *Client,
 	state *anyConnectSessionState,
 	transport *cstpConnectedTransport,
-) *anyConnectCSTPSession {
+) (*anyConnectCSTPSession, error) {
 	sessionContext, cancel := context.WithCancel(ctx)
 	negotiated := transport.negotiated
 	session := &anyConnectCSTPSession{
-		ctx:           sessionContext,
-		cancel:        cancel,
-		client:        client,
-		state:         state,
-		transport:     transport,
-		configuration: cloneTunnelConfiguration(negotiated.Configuration),
-		keepalive:     newCSTPKeepaliveState(negotiated.DPD, negotiated.Keepalive, negotiated.Rekey, negotiated.RekeyMethod),
-		done:          make(chan error, 1),
+		ctx:                 sessionContext,
+		cancel:              cancel,
+		client:              client,
+		state:               state,
+		transport:           transport,
+		configuration:       cloneTunnelConfiguration(negotiated.Configuration),
+		keepalive:           newCSTPKeepaliveState(negotiated.DPD, negotiated.Keepalive, negotiated.Rekey, negotiated.RekeyMethod),
+		compression:         negotiated.Compression,
+		outgoingCompression: negotiated.Compression,
+		done:                make(chan error, 1),
+	}
+	if negotiated.Compression == anyConnectCompressionDeflate {
+		deflate, err := newAnyConnectDeflateState()
+		if err != nil {
+			cancel()
+			closeErr := transport.connection.Close()
+			if E.IsClosed(closeErr) {
+				closeErr = nil
+			}
+			return nil, E.Errors(err, closeErr)
+		}
+		session.deflate = deflate
 	}
 	state.access.Lock()
 	state.PreviousAddresses = append([]netip.Prefix(nil), negotiated.Configuration.Addresses...)
@@ -97,7 +114,7 @@ func newAnyConnectCSTPSession(
 		}
 		session.dtlsNegotiation = &dtlsNegotiation
 	}
-	return session
+	return session, nil
 }
 
 func (s *anyConnectCSTPSession) Start() error {
@@ -132,7 +149,7 @@ func (s *anyConnectCSTPSession) Start() error {
 	s.lifecycleAccess.Lock()
 	if s.closed || !s.active.Load() {
 		s.lifecycleAccess.Unlock()
-		return E.New("AnyConnect CSTP session closed during startup")
+		return E.New("CSTP session closed during startup")
 	}
 	s.ready.Store(true)
 	s.lifecycleAccess.Unlock()
@@ -172,7 +189,7 @@ func (s *anyConnectCSTPSession) WriteDataPacketBuffers(packetBuffers []*buf.Buff
 	for index, packetBuffer := range packetBuffers {
 		mtu := s.currentMTU()
 		if packetBuffer.Len() > mtu {
-			return E.New("AnyConnect data packet exceeds negotiated MTU: ", packetBuffer.Len(), " > ", mtu)
+			return E.New("data packet exceeds negotiated MTU: ", packetBuffer.Len(), " > ", mtu)
 		}
 		s.dtlsAccess.RLock()
 		dtlsChannel := s.dtls
@@ -198,9 +215,31 @@ func (s *anyConnectCSTPSession) writeDataPacketBuffers(packetBuffers []*buf.Buff
 		mtu := s.currentMTU()
 		if packetBuffer.Len() > mtu {
 			s.writeAccess.Unlock()
-			return E.New("AnyConnect data packet exceeds negotiated MTU: ", packetBuffer.Len(), " > ", mtu)
+			return E.New("data packet exceeds negotiated MTU: ", packetBuffer.Len(), " > ", mtu)
 		}
-		err := writeCSTPPacketBuffer(s.transport.connection, cstpPacketData, &packetBuffers[index])
+		packetType := cstpPacketData
+		switch s.outgoingCompression {
+		case anyConnectCompressionLZ4, anyConnectCompressionLZS:
+			compressedPacket, compressed := compressAnyConnectStatelessPacket(s.outgoingCompression, packetBuffer.Bytes())
+			if compressed {
+				packetBuffer.Release()
+				packetBuffers[index] = compressedPacket
+				packetType = cstpPacketCompressed
+			}
+		case anyConnectCompressionDeflate:
+			compressedPacket, compressionErr := s.deflate.compress(packetBuffer.Bytes())
+			if compressionErr != nil {
+				s.outgoingCompression = anyConnectCompressionNone
+				if s.client.options.Logger != nil {
+					s.client.options.Logger.WarnContext(s.ctx, "deflate compression failed; disabling outgoing compression: ", compressionErr)
+				}
+			} else {
+				packetBuffer.Release()
+				packetBuffers[index] = compressedPacket
+				packetType = cstpPacketCompressed
+			}
+		}
+		err := writeCSTPPacketBuffer(s.transport.connection, packetType, &packetBuffers[index])
 		if err != nil {
 			s.writeAccess.Unlock()
 			s.terminate(err)
@@ -214,7 +253,7 @@ func (s *anyConnectCSTPSession) writeDataPacketBuffers(packetBuffers []*buf.Buff
 
 func (s *anyConnectCSTPSession) Fail(err error) {
 	if err == nil {
-		err = E.New("AnyConnect CSTP session failed")
+		err = E.New("CSTP session failed")
 	}
 	s.terminate(err)
 }
@@ -271,8 +310,14 @@ func (s *anyConnectCSTPSession) writePacket(packetType byte, payload []byte) err
 func (s *anyConnectCSTPSession) readLoop() {
 	defer s.waitGroup.Done()
 	maximumPayloadSize := max(s.currentMTU(), 16384)
+	maximumWirePayloadSize := maximumPayloadSize
+	if s.compression == anyConnectCompressionDeflate {
+		// A stateful DEFLATE record can be slightly larger than the original
+		// packet, while its decompressed payload is still bounded below.
+		maximumWirePayloadSize = cstpMaximumPayloadSize
+	}
 	for {
-		packetType, packetBuffer, err := readCSTPPacket(s.transport.reader, maximumPayloadSize)
+		packetType, packetBuffer, err := readCSTPPacket(s.transport.reader, maximumWirePayloadSize)
 		if err != nil {
 			if s.ctx.Err() == nil && !E.IsClosed(err) && err != io.EOF {
 				s.terminate(err)
@@ -292,16 +337,37 @@ func (s *anyConnectCSTPSession) readLoop() {
 		case cstpPacketDPDResponse, cstpPacketKeepalive:
 			packetBuffer.Release()
 		case cstpPacketData:
-			s.client.pushIncomingDataPacket(packetBuffer)
+			s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
 		case cstpPacketDisconnect, cstpPacketTerminate:
 			reason := renderCSTPDisconnectReason(packetBuffer.Bytes())
 			packetBuffer.Release()
-			s.terminate(markTerminal(E.New("AnyConnect server disconnected CSTP session: ", reason)))
+			s.terminate(markTerminal(E.New("server disconnected CSTP session: ", reason)))
 			return
 		case cstpPacketCompressed:
-			packetBuffer.Release()
-			s.terminate(E.Extend(ErrProtocolNotSupported, "received compressed CSTP packet without negotiated compression"))
-			return
+			if s.compression == anyConnectCompressionNone {
+				packetBuffer.Release()
+				s.terminate(E.Extend(ErrProtocolNotSupported, "received compressed CSTP packet without negotiated compression"))
+				return
+			}
+			var decompressedPacket *buf.Buffer
+			if s.compression == anyConnectCompressionDeflate {
+				decompressedPacket, err = s.deflate.decompress(packetBuffer.Bytes(), maximumPayloadSize)
+				packetBuffer.Release()
+				if err != nil {
+					s.terminate(E.Cause(err, "decompress stateful CSTP packet"))
+					return
+				}
+			} else {
+				decompressedPacket, err = decompressAnyConnectStatelessPacket(s.compression, packetBuffer.Bytes(), maximumPayloadSize)
+				packetBuffer.Release()
+				if err != nil {
+					if s.client.options.Logger != nil {
+						s.client.options.Logger.DebugContext(s.ctx, "Ignoring invalid ", s.compression.String(), "-compressed CSTP packet: ", err)
+					}
+					continue
+				}
+			}
+			s.client.pushIncomingDataPacketContext(s.ctx, decompressedPacket)
 		default:
 			packetBuffer.Release()
 			s.terminate(E.Extend(ErrProtocolNotSupported, "received unknown CSTP packet type: ", packetType))
@@ -351,7 +417,9 @@ func (s *anyConnectCSTPSession) dtlsLoop(initialResult chan<- error) {
 	for s.ctx.Err() == nil && s.active.Load() {
 		negotiation := *s.dtlsNegotiation
 		negotiation.MTU = s.currentMTU()
-		channel := newAnyConnectDTLS(s.ctx, negotiation, s.client.pushIncomingDataPacket)
+		channel := newAnyConnectDTLS(s.ctx, negotiation, func(packetBuffer *buf.Buffer) {
+			s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
+		})
 		s.dtlsAccess.Lock()
 		if !s.active.Load() {
 			s.dtlsAccess.Unlock()
@@ -367,7 +435,7 @@ func (s *anyConnectCSTPSession) dtlsLoop(initialResult chan<- error) {
 			s.applyDTLSMTU(channel.DetectedMTU())
 			s.client.setActiveTransport(s, TransportDTLS)
 			if fallbackLogged && s.client.options.Logger != nil {
-				s.client.options.Logger.InfoContext(s.ctx, "AnyConnect DTLS restored")
+				s.client.options.Logger.InfoContext(s.ctx, "DTLS restored")
 			}
 			fallbackLogged = false
 		}
@@ -407,13 +475,13 @@ func (s *anyConnectCSTPSession) dtlsLoop(initialResult chan<- error) {
 		}
 		if s.client.options.Logger != nil {
 			if fallbackLogged {
-				s.client.options.Logger.DebugContext(s.ctx, "AnyConnect DTLS retry failed; CSTP remains active: ", dtlsErr)
+				s.client.options.Logger.DebugContext(s.ctx, "DTLS retry failed; CSTP remains active: ", dtlsErr)
 			} else {
 				fallbackLogged = true
 				if dtlsErr == nil {
-					s.client.options.Logger.WarnContext(s.ctx, "AnyConnect DTLS stopped; retrying while CSTP remains active")
+					s.client.options.Logger.WarnContext(s.ctx, "DTLS stopped; retrying while CSTP remains active")
 				} else {
-					s.client.options.Logger.WarnContext(s.ctx, "AnyConnect DTLS unavailable; retrying while CSTP remains active: ", dtlsErr)
+					s.client.options.Logger.WarnContext(s.ctx, "DTLS unavailable; retrying while CSTP remains active: ", dtlsErr)
 				}
 			}
 		}

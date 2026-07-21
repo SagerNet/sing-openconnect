@@ -157,7 +157,7 @@ func encodePPPFrame(encapsulation pppEncapsulation, payload []byte, asyncMap uin
 		return encodePPPHDLCFrame(payload, asyncMap), nil
 	case pppEncapsulationFortinet:
 		if len(payload) > pppMaximumPayloadLength-6 {
-			return nil, E.New("Fortinet PPP payload exceeds frame length field")
+			return nil, E.New("PPP payload exceeds frame length field")
 		}
 		frame := make([]byte, 6+len(payload))
 		binary.BigEndian.PutUint16(frame[:2], uint16(len(frame)))

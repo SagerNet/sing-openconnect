@@ -122,11 +122,11 @@ func (a *anyConnectAuthentication) runHostScan(ctx context.Context) error {
 		return conn, nil
 	}
 	hostScanClient := &http.Client{
-		Transport: hostScanTransport,
+		Transport: a.frontend.client.wrapHTTPTransport(hostScanTransport),
 		Jar:       hostScanJar,
 		CheckRedirect: func(request *http.Request, previous []*http.Request) error {
 			if len(previous) >= anyConnectMaximumRedirects {
-				return markTerminal(E.New("AnyConnect CSD exceeded ", anyConnectMaximumRedirects, " redirects"))
+				return markTerminal(E.New("CSD exceeded ", anyConnectMaximumRedirects, " redirects"))
 			}
 			return validateAnyConnectHostScanURL(request.URL)
 		},
@@ -178,7 +178,7 @@ func (a *anyConnectAuthentication) runBuiltInAnyConnectHostScan(ctx context.Cont
 		return err
 	}
 	if response.statusCode != http.StatusOK {
-		return anyConnectHTTPStatusError(response.statusCode, "AnyConnect CSD token request returned HTTP ")
+		return anyConnectHTTPStatusError(response.statusCode, "CSD token request returned HTTP ")
 	}
 	var tokenDocument anyConnectHostScanTokenXML
 	decoder := xml.NewDecoder(bytes.NewReader(response.body))
@@ -192,13 +192,19 @@ func (a *anyConnectAuthentication) runBuiltInAnyConnectHostScan(ctx context.Cont
 	}
 	scanToken := strings.TrimSpace(tokenDocument.Token)
 	if scanToken == "" {
-		return markTerminal(E.New("AnyConnect CSD token response omitted token"))
+		return markTerminal(E.New("CSD token response omitted token"))
 	}
 	requestedFields, err := a.fetchAnyConnectHostScanData(ctx, client)
 	if err != nil {
 		return err
 	}
-	report, err := buildAnyConnectHostScanReport(ctx, requestedFields, a.frontend.client.options.Logger, a.frontend.client.options.Context)
+	report, err := buildAnyConnectHostScanReport(
+		ctx,
+		requestedFields,
+		a.frontend.client.options.LocalHostname,
+		a.frontend.client.options.Logger,
+		a.frontend.client.options.Context,
+	)
 	if err != nil {
 		return err
 	}
@@ -215,7 +221,7 @@ func (a *anyConnectAuthentication) runBuiltInAnyConnectHostScan(ctx context.Cont
 		return err
 	}
 	if response.statusCode < http.StatusOK || response.statusCode >= http.StatusMultipleChoices {
-		return anyConnectHTTPStatusError(response.statusCode, "AnyConnect CSD scan submission returned HTTP ")
+		return anyConnectHTTPStatusError(response.statusCode, "CSD scan submission returned HTTP ")
 	}
 	return nil
 }
@@ -324,14 +330,14 @@ func (a *anyConnectAuthentication) pollAnyConnectHostScanWait(ctx context.Contex
 			return err
 		}
 		if response.statusCode != http.StatusOK {
-			return anyConnectHTTPStatusError(response.statusCode, "AnyConnect CSD wait request returned HTTP ")
+			return anyConnectHTTPStatusError(response.statusCode, "CSD wait request returned HTTP ")
 		}
 		trimmedBody := bytes.TrimSpace(response.body)
 		if bytes.HasPrefix(trimmedBody, []byte("<?xml")) {
 			return nil
 		}
 		if !anyConnectHostScanHTMLRefresh.Match(trimmedBody) {
-			return markTerminal(E.New("AnyConnect CSD wait endpoint returned neither XML nor an HTML refresh page"))
+			return markTerminal(E.New("CSD wait endpoint returned neither XML nor an HTML refresh page"))
 		}
 		timer := time.NewTimer(time.Second)
 		select {
@@ -410,12 +416,12 @@ func (a *anyConnectAuthentication) runAnyConnectHostScanWrapper(ctx context.Cont
 	exitError, exited := err.(*exec.ExitError)
 	if exited && exitError.ProcessState.Exited() {
 		if a.frontend.client.options.Logger != nil {
-			a.frontend.client.options.Logger.WarnContext(ctx, "AnyConnect CSD wrapper exited unsuccessfully; continuing as upstream does: ", err)
+			a.frontend.client.options.Logger.WarnContext(ctx, "CSD wrapper exited unsuccessfully; continuing as upstream does: ", err)
 		}
 		return nil
 	}
 	if exited {
-		return markTerminal(E.Cause(err, "AnyConnect CSD wrapper terminated abnormally"))
+		return markTerminal(E.Cause(err, "CSD wrapper terminated abnormally"))
 	}
 	return markTerminal(E.Cause(err, "start AnyConnect CSD wrapper"))
 }
@@ -443,7 +449,7 @@ func (a *anyConnectAuthentication) probeAnyConnectHostScanCertificate(ctx contex
 	connectionState := tlsConn.ConnectionState()
 	if len(connectionState.PeerCertificates) == 0 {
 		closeErr := tlsConn.Close()
-		return nil, markTerminal(E.Errors(E.New("AnyConnect CSD wrapper TLS peer sent no certificate"), closeErr))
+		return nil, markTerminal(E.Errors(E.New("CSD wrapper TLS peer sent no certificate"), closeErr))
 	}
 	certificate := connectionState.PeerCertificates[0]
 	authenticatedAddress := parseAnyConnectRemoteAddress(tlsConn.RemoteAddr())
@@ -470,9 +476,9 @@ func resolveAnyConnectHostScanURL(baseURL *url.URL, reference string) (*url.URL,
 func validateAnyConnectHostScanURL(targetURL *url.URL) error {
 	if targetURL == nil || targetURL.Scheme != "https" || targetURL.Hostname() == "" {
 		if targetURL == nil {
-			return markTerminal(E.New("AnyConnect CSD URL is empty"))
+			return markTerminal(E.New("CSD URL is empty"))
 		}
-		return markTerminal(E.New("AnyConnect CSD URL is not an HTTPS host URL: ", targetURL.String()))
+		return markTerminal(E.New("CSD URL is not an HTTPS host URL: ", targetURL.String()))
 	}
 	return nil
 }
@@ -554,6 +560,7 @@ func parseAnyConnectHostScanRequestedField(value string) (anyConnectHostScanRequ
 func buildAnyConnectHostScanReport(
 	ctx context.Context,
 	requestedFields []anyConnectHostScanRequestedField,
+	localHostname string,
 	logger interface {
 		DebugContext(context.Context, ...any)
 		WarnContext(context.Context, ...any)
@@ -567,11 +574,7 @@ func buildAnyConnectHostScanReport(
 	if platform.release != "" {
 		appendAnyConnectHostScanValue(&report, "endpoint.os.servicepack", platform.release)
 	}
-	hostname, err := os.Hostname()
-	if err != nil {
-		return nil, markTerminal(E.Cause(err, "read hostname for AnyConnect CSD report"))
-	}
-	appendAnyConnectHostScanValue(&report, "endpoint.device.hostname", hostname)
+	appendAnyConnectHostScanValue(&report, "endpoint.device.hostname", localHostname)
 	interfaces, err := net.Interfaces()
 	if err != nil {
 		return nil, markTerminal(E.Cause(err, "list network interfaces for AnyConnect CSD report"))
@@ -654,7 +657,7 @@ func buildAnyConnectHostScanReport(
 		}
 	}
 	if len(omittedFields) > 0 && logger != nil {
-		logger.WarnContext(logContext, "AnyConnect CSD report omitted or incompletely inspected ", len(omittedFields), " requested fields")
+		logger.WarnContext(logContext, "CSD report omitted or incompletely inspected ", len(omittedFields), " requested fields")
 	}
 	return []byte(report.String()), nil
 }

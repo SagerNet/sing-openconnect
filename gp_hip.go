@@ -121,37 +121,37 @@ func newGPHIPRunner(
 	interval time.Duration,
 ) (*gpHIPRunner, error) {
 	if client == nil || client.httpClient == nil || client.httpTransport == nil {
-		return nil, markTerminal(E.New("GlobalProtect HIP requires an initialized client"))
+		return nil, markTerminal(E.New("HIP requires an initialized client"))
 	}
 	if serverURL == nil || serverURL.Scheme != "https" || serverURL.Hostname() == "" || serverURL.User != nil || serverURL.Opaque != "" {
-		return nil, markTerminal(E.New("GlobalProtect HIP server must be an HTTPS host URL"))
+		return nil, markTerminal(E.New("HIP server must be an HTTPS host URL"))
 	}
 	serverPort := serverURL.Port()
 	if serverPort != "" {
 		parsedPort, err := strconv.ParseUint(serverPort, 10, 16)
 		if err != nil || parsedPort == 0 {
-			return nil, markTerminal(E.New("GlobalProtect HIP server has an invalid port"))
+			return nil, markTerminal(E.New("HIP server has an invalid port"))
 		}
 	}
 	if !authenticatedAddress.IsValid() {
-		return nil, markTerminal(E.New("GlobalProtect HIP requires the authenticated gateway address"))
+		return nil, markTerminal(E.New("HIP requires the authenticated gateway address"))
 	}
 	if opaqueCookie == "" {
-		return nil, markTerminal(E.New("GlobalProtect HIP requires an authentication cookie"))
+		return nil, markTerminal(E.New("HIP requires an authentication cookie"))
 	}
 	assignedIPv4 = assignedIPv4.Unmap()
 	assignedIPv6 = assignedIPv6.Unmap()
 	if assignedIPv4.IsValid() && !assignedIPv4.Is4() {
-		return nil, markTerminal(E.New("GlobalProtect HIP assigned IPv4 address is not IPv4"))
+		return nil, markTerminal(E.New("HIP assigned IPv4 address is not IPv4"))
 	}
 	if assignedIPv6.IsValid() && !assignedIPv6.Is6() {
-		return nil, markTerminal(E.New("GlobalProtect HIP assigned IPv6 address is not IPv6"))
+		return nil, markTerminal(E.New("HIP assigned IPv6 address is not IPv6"))
 	}
 	if !assignedIPv4.IsValid() && !assignedIPv6.IsValid() {
-		return nil, markTerminal(E.New("GlobalProtect HIP requires an assigned IP address"))
+		return nil, markTerminal(E.New("HIP requires an assigned IP address"))
 	}
 	if reportedGPOS == "" {
-		return nil, markTerminal(E.New("GlobalProtect HIP requires a reported GlobalProtect OS"))
+		return nil, markTerminal(E.New("HIP requires a reported GlobalProtect OS"))
 	}
 	md5Text, cookieIdentity, err := buildGPHIPToken(opaqueCookie)
 	if err != nil {
@@ -196,11 +196,11 @@ func (r *gpHIPRunner) Check(ctx context.Context) (gpHIPCheckResult, error) {
 			return nil, markTerminal(E.Cause(err, "parse GlobalProtect HIP destination"))
 		}
 		if !strings.EqualFold(destinationHost, gatewayHost) {
-			return nil, markTerminal(E.New("GlobalProtect HIP attempted to dial outside the authenticated gateway origin"))
+			return nil, markTerminal(E.New("HIP attempted to dial outside the authenticated gateway origin"))
 		}
 		parsedPort, err := strconv.ParseUint(destinationPort, 10, 16)
 		if err != nil || parsedPort == 0 {
-			return nil, markTerminal(E.New("GlobalProtect HIP attempted to dial an invalid gateway port"))
+			return nil, markTerminal(E.New("HIP attempted to dial an invalid gateway port"))
 		}
 		destination := M.ParseSocksaddrHostPort(r.authenticatedAddress.String(), uint16(parsedPort))
 		dialer := r.client.options.Dialer
@@ -211,7 +211,7 @@ func (r *gpHIPRunner) Check(ctx context.Context) (gpHIPCheckResult, error) {
 		return conn, nil
 	}
 	httpClient := &http.Client{
-		Transport: transport,
+		Transport: r.client.wrapHTTPTransport(transport),
 		Jar:       r.client.httpClient.Jar,
 		CheckRedirect: func(request *http.Request, previousRequests []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -241,7 +241,7 @@ func (r *gpHIPRunner) Check(ctx context.Context) (gpHIPCheckResult, error) {
 	case "yes":
 		result.ReportNeeded = true
 	default:
-		return gpHIPCheckResult{}, markTerminal(E.New("GlobalProtect HIP check response omitted a valid hip-report-needed value"))
+		return gpHIPCheckResult{}, markTerminal(E.New("HIP check response omitted a valid hip-report-needed value"))
 	}
 	var report []byte
 	if r.client.options.HIP != nil && r.client.options.HIP.WrapperPath != "" {
@@ -386,7 +386,7 @@ func (r *gpHIPRunner) post(
 		return nil, E.Cause(closeErr, "close GlobalProtect HIP ", operation, " response")
 	}
 	if len(responseBody) > gpHIPMaximumResponseBody {
-		return nil, markTerminal(E.New("GlobalProtect HIP ", operation, " response exceeds ", gpHIPMaximumResponseBody, " bytes"))
+		return nil, markTerminal(E.New("HIP ", operation, " response exceeds ", gpHIPMaximumResponseBody, " bytes"))
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return nil, gpHIPHTTPStatusError(response.StatusCode, operation)
@@ -395,7 +395,7 @@ func (r *gpHIPRunner) post(
 }
 
 func gpHIPHTTPStatusError(statusCode int, operation string) error {
-	err := E.New("GlobalProtect HIP ", operation, " returned HTTP ", statusCode)
+	err := E.New("HIP ", operation, " returned HTTP ", statusCode)
 	switch statusCode {
 	case http.StatusUnauthorized, http.StatusForbidden, 512:
 		return E.Errors(ErrSessionRejected, err)
@@ -442,7 +442,7 @@ func parseGPHIPResponse(content []byte, operation string, opaqueCookie string) (
 				safeMessage = strings.ReplaceAll(safeMessage, decodedCookieValue, "[redacted authcookie]")
 			}
 		}
-		serverErr := E.New("GlobalProtect HIP ", operation, " response reported an error: ", safeMessage)
+		serverErr := E.New("HIP ", operation, " response reported an error: ", safeMessage)
 		switch serverMessage {
 		case "Invalid authentication cookie", "Portal name not found":
 			return gpHIPResponseXML{}, E.Errors(ErrSessionRejected, serverErr)
@@ -456,13 +456,7 @@ func parseGPHIPResponse(content []byte, operation string, opaqueCookie string) (
 }
 
 func (r *gpHIPRunner) buildReport() ([]byte, error) {
-	hostname, err := os.Hostname()
-	if err != nil {
-		return nil, markTerminal(E.Cause(err, "read hostname for GlobalProtect HIP report"))
-	}
-	if hostname == "" {
-		return nil, markTerminal(E.New("local hostname is empty for GlobalProtect HIP report"))
-	}
+	hostname := r.client.options.LocalHostname
 	networkInterfaces, err := net.Interfaces()
 	if err != nil {
 		return nil, markTerminal(E.Cause(err, "list network interfaces for GlobalProtect HIP report"))
@@ -535,7 +529,7 @@ func (r *gpHIPRunner) buildReport() ([]byte, error) {
 	report = append(report, reportContent...)
 	report = append(report, '\n')
 	if len(report) > gpHIPMaximumReportBody {
-		return nil, markTerminal(E.New("GlobalProtect HIP report exceeds ", gpHIPMaximumReportBody, " bytes"))
+		return nil, markTerminal(E.New("HIP report exceeds ", gpHIPMaximumReportBody, " bytes"))
 	}
 	return report, nil
 }
@@ -611,15 +605,15 @@ func (r *gpHIPRunner) runWrapper(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		exitError, exited := E.Cast[*exec.ExitError](err)
 		if exited && exitError.ProcessState != nil && exitError.ProcessState.Exited() {
-			return nil, markTerminal(E.New("GlobalProtect HIP wrapper returned non-zero status: ", exitError.ExitCode()))
+			return nil, markTerminal(E.New("HIP wrapper returned non-zero status: ", exitError.ExitCode()))
 		}
-		return nil, markTerminal(E.Cause(err, "GlobalProtect HIP wrapper terminated abnormally"))
+		return nil, markTerminal(E.Cause(err, "HIP wrapper terminated abnormally"))
 	}
 	if standardOutput.exceeded {
-		return nil, markTerminal(E.New("GlobalProtect HIP wrapper report exceeds ", gpHIPMaximumReportBody, " bytes"))
+		return nil, markTerminal(E.New("HIP wrapper report exceeds ", gpHIPMaximumReportBody, " bytes"))
 	}
 	if standardOutput.buffer.Len() == 0 {
-		return nil, markTerminal(E.New("GlobalProtect HIP wrapper returned an empty report"))
+		return nil, markTerminal(E.New("HIP wrapper returned an empty report"))
 	}
 	return append([]byte(nil), standardOutput.buffer.Bytes()...), nil
 }

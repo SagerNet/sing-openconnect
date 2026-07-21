@@ -7,6 +7,7 @@ import (
 	"time"
 
 	E "github.com/sagernet/sing/common/exceptions"
+	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 
@@ -37,6 +38,8 @@ type cstpDTLSNegotiation struct {
 	MTU                 int
 	MinimumMTU          int
 	AllowInsecureCrypto bool
+	Compression         anyConnectCompression
+	Logger              logger.ContextLogger
 	RequestRekey        func(method string) error
 }
 

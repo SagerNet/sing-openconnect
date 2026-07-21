@@ -135,7 +135,7 @@ func newNCBuiltInTNCCRunner(
 	jar http.CookieJar,
 ) (*ncBuiltInTNCCRunner, error) {
 	if serverURL == nil || !acceptedAddress.IsValid() || jar == nil {
-		return nil, markTerminal(E.New("Network Connect built-in TNCC requires an accepted HTTPS endpoint and cookie jar"))
+		return nil, markTerminal(E.New("built-in TNCC requires an accepted HTTPS endpoint and cookie jar"))
 	}
 	options := frontend.client.options.TNCC
 	userAgent := ncTNCCDefaultUserAgent
@@ -148,7 +148,7 @@ func newNCBuiltInTNCCRunner(
 		deviceID = options.DeviceID
 		machineIdentification = options.MachineIdentificationEnabled
 	}
-	httpClient, transport, err := newNCPinnedHTTPClient(frontend.client, serverURL, acceptedAddress, jar)
+	httpClient, transport, _, err := newNCPinnedHTTPClient(frontend.client, serverURL, acceptedAddress, jar)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +233,7 @@ func (r *ncBuiltInTNCCRunner) exchange(ctx context.Context) (string, error) {
 	}
 	encodedMessage := responseValues["msg"]
 	if encodedMessage == "" {
-		return "", markTerminal(E.New("Network Connect TNCC initial response omitted msg"))
+		return "", markTerminal(E.New("TNCC initial response omitted msg"))
 	}
 	message, err := base64.StdEncoding.DecodeString(encodedMessage)
 	if err != nil {
@@ -268,7 +268,7 @@ func (r *ncBuiltInTNCCRunner) exchange(ctx context.Context) (string, error) {
 	}
 	preauthenticationCookie := ncCookieValue(r.jar, r.serverURL, "DSPREAUTH")
 	if preauthenticationCookie == "" {
-		return "", markTerminal(E.New("Network Connect TNCC response omitted a DSPREAUTH cookie"))
+		return "", markTerminal(E.New("TNCC response omitted a DSPREAUTH cookie"))
 	}
 	return preauthenticationCookie, nil
 }
@@ -307,10 +307,10 @@ func (r *ncBuiltInTNCCRunner) post(ctx context.Context, body string, operation s
 		return nil, E.Cause(closeErr, "close Network Connect TNCC ", operation, " response")
 	}
 	if len(responseBody) > ncTNCCMaximumHTTPBody {
-		return nil, markTerminal(E.New("Network Connect TNCC ", operation, " response exceeds ", ncTNCCMaximumHTTPBody, " bytes"))
+		return nil, markTerminal(E.New("TNCC ", operation, " response exceeds ", ncTNCCMaximumHTTPBody, " bytes"))
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return nil, markTerminal(E.New("Network Connect TNCC ", operation, " returned HTTP ", response.StatusCode))
+		return nil, markTerminal(E.New("TNCC ", operation, " returned HTTP ", response.StatusCode))
 	}
 	return responseBody, nil
 }
@@ -390,30 +390,30 @@ func decodeNCTNCCMessage(content []byte) ([]ncTNCCString, error) {
 
 func decodeNCTNCCPackets(content []byte, depth int, state *ncTNCCDecodeState) error {
 	if depth > ncTNCCMaximumNesting {
-		return markTerminal(E.New("Network Connect TNCC message nesting exceeds ", ncTNCCMaximumNesting))
+		return markTerminal(E.New("TNCC message nesting exceeds ", ncTNCCMaximumNesting))
 	}
 	position := 0
 	for position < len(content) {
 		if len(content)-position < 12 {
 			for _, value := range content[position:] {
 				if value != 0 {
-					return markTerminal(E.New("Network Connect TNCC message has a truncated packet header"))
+					return markTerminal(E.New("TNCC message has a truncated packet header"))
 				}
 			}
 			return nil
 		}
 		state.packetCount++
 		if state.packetCount > ncTNCCMaximumPacketCount {
-			return markTerminal(E.New("Network Connect TNCC message contains too many packets"))
+			return markTerminal(E.New("TNCC message contains too many packets"))
 		}
 		command := binary.BigEndian.Uint32(content[position:])
 		packetLength := int(binary.BigEndian.Uint16(content[position+6:]))
 		if packetLength < 12 || packetLength > len(content)-position {
-			return markTerminal(E.New("Network Connect TNCC packet has an invalid length: ", packetLength))
+			return markTerminal(E.New("TNCC packet has an invalid length: ", packetLength))
 		}
 		paddedLength := (packetLength + 3) &^ 3
 		if paddedLength > len(content)-position {
-			return markTerminal(E.New("Network Connect TNCC packet padding exceeds its container"))
+			return markTerminal(E.New("TNCC packet padding exceeds its container"))
 		}
 		payload := content[position+12 : position+packetLength]
 		switch command {
@@ -431,7 +431,7 @@ func decodeNCTNCCPackets(content []byte, depth int, state *ncTNCCDecodeState) er
 			}
 		case ncTNCCCommandCompressed:
 			if len(payload) < 4 {
-				return markTerminal(E.New("Network Connect TNCC compressed packet is too short"))
+				return markTerminal(E.New("TNCC compressed packet is too short"))
 			}
 			decoded, err := decompressNCTNCC(payload[4:])
 			if err != nil {
@@ -443,14 +443,14 @@ func decodeNCTNCCPackets(content []byte, depth int, state *ncTNCCDecodeState) er
 			}
 		case ncTNCCCommandStringWithID:
 			if len(payload) < 4 {
-				return markTerminal(E.New("Network Connect TNCC identified string is too short"))
+				return markTerminal(E.New("TNCC identified string is too short"))
 			}
 			identifier := binary.BigEndian.Uint32(payload)
 			stringContent := bytes.TrimRight(payload[4:], "\x00")
 			if bytes.HasPrefix(stringContent, []byte("COMPRESSED:")) {
 				parts := bytes.SplitN(stringContent, []byte(":"), 3)
 				if len(parts) != 3 {
-					return markTerminal(E.New("Network Connect TNCC compressed string has no payload"))
+					return markTerminal(E.New("TNCC compressed string has no payload"))
 				}
 				decoded, err := decompressNCTNCC(parts[2])
 				if err != nil {
@@ -479,7 +479,7 @@ func decompressNCTNCC(content []byte) ([]byte, error) {
 		return nil, markTerminal(E.Cause(closeErr, "close Network Connect TNCC zlib decoder"))
 	}
 	if len(decoded) > ncTNCCMaximumDecodedMessage {
-		return nil, markTerminal(E.New("Network Connect TNCC decompressed message exceeds ", ncTNCCMaximumDecodedMessage, " bytes"))
+		return nil, markTerminal(E.New("TNCC decompressed message exceeds ", ncTNCCMaximumDecodedMessage, " bytes"))
 	}
 	return decoded, nil
 }
@@ -508,7 +508,7 @@ func (r *ncBuiltInTNCCRunner) buildResponse(stringsFound []ncTNCCString) ([]byte
 	var response []byte
 	if len(certificateRequests) > 0 {
 		if !r.machineIdentification {
-			return nil, markTerminal(E.Extend(ErrProtocolNotSupported, "Network Connect TNCC requested machine certificates; enable machine identification or configure an external TNCC wrapper"))
+			return nil, markTerminal(E.Extend(ErrProtocolNotSupported, "TNCC requested machine certificates; enable machine identification or configure an external TNCC wrapper"))
 		}
 		certificateResponse, err := r.funkCertificateResponse(certificateRequests)
 		if err != nil {
@@ -530,7 +530,7 @@ func (r *ncBuiltInTNCCRunner) buildResponse(stringsFound []ncTNCCString) ([]byte
 			policyResponse.WriteString("NOTOK\nerror:Unknown error")
 			continue
 		}
-		return nil, markTerminal(E.Extend(ErrProtocolNotSupported, "Network Connect TNCC requested unmodeled mandatory policy ", policyName, "; configure an external TNCC wrapper"))
+		return nil, markTerminal(E.Extend(ErrProtocolNotSupported, "TNCC requested unmodeled mandatory policy ", policyName, "; configure an external TNCC wrapper"))
 	}
 	response = append(response, encodeNCTNCCString(ncTNCCPolicyMessage, []byte(policyResponse.String()))...)
 	return response, nil
@@ -589,23 +589,23 @@ func parseNCTNCCFunkRequests(content []byte) (map[string]map[string]string, erro
 	err = decoder.Decode(&trailing)
 	if err != io.EOF {
 		if err == nil {
-			return nil, markTerminal(E.New("Network Connect TNCC Funk request contains trailing XML values"))
+			return nil, markTerminal(E.New("TNCC Funk request contains trailing XML values"))
 		}
 		return nil, markTerminal(E.Cause(err, "parse trailing Network Connect TNCC Funk request XML"))
 	}
 	for _, certificateRequest := range document.AttributeRequest.Certificates {
 		if certificateRequest.Identifier == "" {
-			return nil, markTerminal(E.New("Network Connect TNCC certificate request has no ID"))
+			return nil, markTerminal(E.New("TNCC certificate request has no ID"))
 		}
 		issuerValues := make(map[string]string)
 		for _, attribute := range certificateRequest.Attributes {
 			if attribute.Type != "DN" || attribute.Name != "IssuerDN" {
-				return nil, markTerminal(E.Extend(ErrProtocolNotSupported, "Network Connect TNCC requested unsupported certificate attribute ", attribute.Name, "/", attribute.Type, "; configure an external TNCC wrapper"))
+				return nil, markTerminal(E.Extend(ErrProtocolNotSupported, "TNCC requested unsupported certificate attribute ", attribute.Name, "/", attribute.Type, "; configure an external TNCC wrapper"))
 			}
 			for distinguishedName := range strings.SplitSeq(attribute.Value, ",") {
 				name, value, found := strings.Cut(strings.TrimSpace(distinguishedName), "=")
 				if !found || name == "" || value == "" {
-					return nil, markTerminal(E.New("Network Connect TNCC certificate issuer request is malformed"))
+					return nil, markTerminal(E.New("TNCC certificate issuer request is malformed"))
 				}
 				issuerValues[name] = value
 			}
@@ -666,7 +666,7 @@ func (r *ncBuiltInTNCCRunner) funkCertificateResponse(requests map[string]map[st
 			}
 		}
 		if !found {
-			return "", markTerminal(E.Extend(ErrProtocolNotSupported, "Network Connect TNCC could not satisfy certificate request ", identifier, "; configure the certificate or an external TNCC wrapper"))
+			return "", markTerminal(E.Extend(ErrProtocolNotSupported, "TNCC could not satisfy certificate request ", identifier, "; configure the certificate or an external TNCC wrapper"))
 		}
 	}
 	var document strings.Builder
@@ -708,11 +708,11 @@ func loadNCTNCCCertificates(materials []Material) ([]ncTNCCCertificate, error) {
 		for len(bytes.TrimSpace(remaining)) > 0 {
 			block, rest := pem.Decode(remaining)
 			if block == nil {
-				return nil, markTerminal(E.New("Network Connect TNCC certificate material contains invalid PEM"))
+				return nil, markTerminal(E.New("TNCC certificate material contains invalid PEM"))
 			}
 			remaining = rest
 			if block.Type != "CERTIFICATE" {
-				return nil, markTerminal(E.New("Network Connect TNCC certificate material contains PEM type ", block.Type))
+				return nil, markTerminal(E.New("TNCC certificate material contains PEM type ", block.Type))
 			}
 			certificate, parseErr := x509.ParseCertificate(block.Bytes)
 			if parseErr != nil {

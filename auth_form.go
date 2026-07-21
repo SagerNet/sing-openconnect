@@ -189,6 +189,9 @@ func (c *Client) CancelAuthChallenge(id string) error {
 }
 
 func (c *Client) awaitAuthChallenge(ctx context.Context, request authenticationRequest, continuation authContinuation) (authenticationResponse, error) {
+	if c.options.Flavor == FlavorAnyConnect && c.options.PasswordAuthenticationDisabled {
+		return authenticationResponse{}, markTerminal(E.Errors(ErrAuthenticationFailed, E.New("server requested an authentication form while password authentication is disabled")))
+	}
 	c.clearStableCredentials(request.ClearCacheKeys...)
 	values := make(map[string]string, len(request.Fields))
 	visibleFields := make([]AuthFormField, 0, len(request.Fields))
@@ -219,7 +222,7 @@ func (c *Client) awaitAuthChallenge(ctx context.Context, request authenticationR
 			}
 		}
 		if field.Kind == authFormFieldToken && field.Automatic == nil && fieldValue == "" {
-			return authenticationResponse{}, markTerminal(E.New("openconnect token field has no automatic token generator: ", field.Name))
+			return authenticationResponse{}, markTerminal(E.New("token field has no automatic token generator: ", field.Name))
 		}
 		if (field.Kind == authFormFieldHidden && !promote) || field.Kind == authFormFieldToken {
 			if field.Automatic == nil {
@@ -309,7 +312,7 @@ func (c *Client) awaitAuthChallenge(ctx context.Context, request authenticationR
 			if open && continuationErr != nil {
 				return authenticationResponse{}, continuationErr
 			}
-			return authenticationResponse{}, markTerminal(E.New("openconnect authentication continuation closed while a browser challenge was pending"))
+			return authenticationResponse{}, markTerminal(E.New("authentication continuation closed while a browser challenge was pending"))
 		case response := <-responseChannel:
 			err := evaluateAutomaticFields()
 			if err != nil {
@@ -366,7 +369,7 @@ func (c *Client) awaitAuthChallenge(ctx context.Context, request authenticationR
 		if open && continuationErr != nil {
 			return authenticationResponse{}, continuationErr
 		}
-		return authenticationResponse{}, markTerminal(E.New("openconnect authentication continuation closed while a form was pending"))
+		return authenticationResponse{}, markTerminal(E.New("authentication continuation closed while a form was pending"))
 	case responseValues := <-responseChannel:
 		for _, field := range request.Fields {
 			value, exists := responseValues[field.SubmissionKey]

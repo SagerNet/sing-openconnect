@@ -14,6 +14,9 @@ replace github.com/sagernet/sing-openconnect => ..
 
 require (
 	github.com/anchore/go-lzo v0.1.0 // indirect
+	github.com/google/certificate-transparency-go v1.3.2 // indirect
+	github.com/klauspost/compress v1.18.0 // indirect
+	github.com/pierrec/lz4/v4 v4.1.21 // indirect
 	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/transport/v4 v4.0.2 // indirect
 	golang.org/x/crypto v0.48.0 // indirect

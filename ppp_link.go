@@ -17,10 +17,42 @@ import (
 
 const (
 	pppDefaultTunnelMTU         = 1400
+	pppDefaultBaseMTU           = 1406
 	pppDefaultNegotiationPeriod = 3 * time.Second
 	pppDefaultNegotiationTries  = 10
 	pppDefaultEchoFailures      = 3
 )
+
+func calculatePPPTunnelMTU(requestedMTU uint32, baseMTU uint32, outerIPv6 bool, encapsulation pppEncapsulation) uint32 {
+	mtu := int(requestedMTU)
+	if baseMTU == 0 {
+		baseMTU = pppDefaultBaseMTU
+	}
+	if baseMTU < minimumIPv6MTU {
+		baseMTU = minimumIPv6MTU
+	}
+	if mtu == 0 {
+		outerIPHeaderSize := 20
+		if outerIPv6 {
+			outerIPHeaderSize = 40
+		}
+		mtu = int(baseMTU) - outerIPHeaderSize - 20
+	}
+	overhead := 5
+	switch encapsulation {
+	case pppEncapsulationF5:
+		overhead += 4 + 1
+	case pppEncapsulationF5HDLC:
+		overhead += 4 + 1
+	case pppEncapsulationFortinet:
+		overhead += 6 + 2 + 2
+	}
+	mtu -= overhead
+	if encapsulation == pppEncapsulationF5HDLC {
+		mtu -= mtu >> 5
+	}
+	return uint32(mtu)
+}
 
 var (
 	errPPPPeerDead       = E.New("PPP peer did not answer LCP echo requests")
@@ -774,7 +806,7 @@ func encodePPPOutboundPacketBuffer(encapsulation pppEncapsulation, packet pppOut
 	case pppEncapsulationFortinet:
 		payloadLength := len(header) + (*packet.packetBuffer).Len()
 		if payloadLength > pppMaximumPayloadLength-6 {
-			return nil, E.New("Fortinet PPP payload exceeds frame length field")
+			return nil, E.New("PPP payload exceeds frame length field")
 		}
 		*packet.packetBuffer = requirePacketBufferCapacity(*packet.packetBuffer, 6+len(header), 0)
 		copy((*packet.packetBuffer).ExtendHeader(len(header)), header)

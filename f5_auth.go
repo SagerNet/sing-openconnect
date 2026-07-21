@@ -25,7 +25,7 @@ const (
 	f5MaximumAuthenticationRequests  = 64
 	f5MaximumAuthenticationRedirects = 10
 	f5LogoutTimeout                  = 5 * time.Second
-	f5DefaultUserAgent               = "AnyConnect-compatible OpenConnect VPN Agent"
+	f5DefaultUserAgent               = "AnyConnect-compatible OpenConnect VPN Agent " + defaultClientVersion
 )
 
 type f5Frontend struct {
@@ -99,9 +99,30 @@ type f5SessionSnapshot struct {
 
 func (f *f5Frontend) BeginAuthentication() authContinuation {
 	f.client.httpTransport.CloseIdleConnections()
+	serverURL := cloneF5URL(f.client.serverURL)
+	directCookie := f.client.takeDirectCookie()
+	if directCookie != "" {
+		jar, values, directErr := newDirectCookieJar(serverURL, directCookie, "MRHSession")
+		mrhSession := values["MRHSession"]
+		if directErr == nil && mrhSession == "" {
+			directErr = E.New("direct cookie does not contain MRHSession")
+		}
+		f5ST := values["F5_ST"]
+		return &completedAuthentication{
+			session: &f5SessionState{
+				frontend:                 f,
+				serverURL:                serverURL,
+				jar:                      jar,
+				mrhSession:               mrhSession,
+				f5ST:                     f5ST,
+				authenticationExpiration: parseF5AuthenticationExpiration(f5ST),
+			},
+			err: directErr,
+		}
+	}
 	jar, initializationErr := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
 	authenticationClient := &http.Client{
-		Transport: f.client.httpTransport,
+		Transport: f.client.wrapHTTPTransport(f.client.httpTransport),
 		Jar:       jar,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -112,7 +133,7 @@ func (f *f5Frontend) BeginAuthentication() authContinuation {
 		initializationErr: initializationErr,
 		httpClient:        authenticationClient,
 		jar:               jar,
-		currentURL:        cloneF5URL(f.client.serverURL),
+		currentURL:        serverURL,
 		tokenGenerator:    newSoftwareTokenGenerator(f.client.options.Token),
 	}
 }
@@ -158,11 +179,11 @@ func (a *f5Authentication) Advance(
 	}
 	if a.completed {
 		a.access.Unlock()
-		return nil, nil, E.Extend(ErrProtocolNotSupported, "F5 authentication continuation is already complete")
+		return nil, nil, E.Extend(ErrProtocolNotSupported, "authentication continuation is already complete")
 	}
 	if a.advancing {
 		a.access.Unlock()
-		return nil, nil, E.Extend(ErrProtocolNotSupported, "F5 authentication continuation is already advancing")
+		return nil, nil, E.Extend(ErrProtocolNotSupported, "authentication continuation is already advancing")
 	}
 	a.advancing = true
 	started := a.started
@@ -236,7 +257,7 @@ func (a *f5Authentication) doAuthenticationExchange(
 	currentBody := encodedForm
 	for redirectNumber := 0; ; redirectNumber++ {
 		if redirectNumber > f5MaximumAuthenticationRedirects {
-			return nil, nil, markTerminal(E.New("F5 authentication exceeded ", f5MaximumAuthenticationRedirects, " redirects"))
+			return nil, nil, markTerminal(E.New("authentication exceeded ", f5MaximumAuthenticationRedirects, " redirects"))
 		}
 		httpResponse, requestErr := a.doAuthenticationRequest(ctx, currentMethod, currentURL, currentBody)
 		if requestErr != nil {
@@ -286,7 +307,7 @@ func (a *f5Authentication) doAuthenticationExchange(
 		}
 		if httpResponse.statusCode < http.StatusOK || httpResponse.statusCode >= http.StatusMultipleChoices {
 			return nil, nil, markTerminal(E.New(
-				"F5 authentication returned unexpected HTTP status ",
+				"authentication returned unexpected HTTP status ",
 				httpResponse.statusCode,
 				" ",
 				http.StatusText(httpResponse.statusCode),
@@ -307,7 +328,7 @@ func (a *f5Authentication) doAuthenticationRequest(
 	requestNumber := a.requests
 	a.access.Unlock()
 	if requestNumber > f5MaximumAuthenticationRequests {
-		return f5HTTPResponse{}, markTerminal(E.New("F5 authentication exceeded ", f5MaximumAuthenticationRequests, " wire requests"))
+		return f5HTTPResponse{}, markTerminal(E.New("authentication exceeded ", f5MaximumAuthenticationRequests, " wire requests"))
 	}
 	var body io.Reader
 	if method == http.MethodPost {
@@ -354,7 +375,7 @@ func (a *f5Authentication) doAuthenticationRequest(
 		return f5HTTPResponse{}, E.Cause(closeErr, "close F5 authentication response")
 	}
 	if len(responseBody) > f5MaximumAuthenticationBody {
-		return f5HTTPResponse{}, markTerminal(E.New("F5 authentication response exceeds ", f5MaximumAuthenticationBody, " bytes"))
+		return f5HTTPResponse{}, markTerminal(E.New("authentication response exceeds ", f5MaximumAuthenticationBody, " bytes"))
 	}
 	return f5HTTPResponse{
 		statusCode: response.StatusCode,
@@ -391,7 +412,7 @@ func (a *f5Authentication) authenticationRequestFromDocument(
 	}
 	if form == nil {
 		a.access.Unlock()
-		return nil, nil, markTerminal(E.New("F5 authentication response has no usable form"))
+		return nil, nil, markTerminal(E.New("authentication response has no usable form"))
 	}
 	repeatedPrimary := a.primaryPasswordSent && isF5PrimaryAuthenticationForm(form)
 	firstPrimaryPassword := !a.primaryPasswordSeen && f5FormHasPassword(form)
@@ -419,7 +440,7 @@ func (a *f5Authentication) buildAuthenticationRequestLocked(
 		Message: form.message,
 	}
 	if repeatedPrimary {
-		request.Error = "F5 gateway rejected the primary credentials"
+		request.Error = "gateway rejected the primary credentials"
 		request.ClearCacheKeys = []string{authCachePassword}
 	}
 	primaryPasswordAssigned := false
@@ -493,7 +514,7 @@ func (a *f5Authentication) sessionFromCookies(requestURL *url.URL) (*f5SessionSt
 		return nil, nil
 	}
 	if !acceptedAddress.IsValid() {
-		return nil, markTerminal(E.New("F5 authenticated endpoint has no accepted peer address"))
+		return nil, markTerminal(E.New("authenticated endpoint has no accepted peer address"))
 	}
 	return &f5SessionState{
 		frontend:                 a.frontend,
@@ -523,7 +544,7 @@ func encodeF5AuthenticationResponse(form *f5AuthenticationForm, response *authen
 	for fieldIndex, field := range form.fields {
 		value, loaded := response.Values[field.submissionKey]
 		if !loaded {
-			return "", E.Extend(ErrProtocolNotSupported, "F5 authentication response omitted field ", field.name)
+			return "", E.Extend(ErrProtocolNotSupported, "authentication response omitted field ", field.name)
 		}
 		if fieldIndex > 0 {
 			encoded.WriteByte('&')
@@ -616,18 +637,18 @@ func equalF5Endpoint(left *url.URL, right *url.URL) bool {
 
 func f5URLPort(serverURL *url.URL) (uint16, error) {
 	if serverURL == nil {
-		return 0, E.New("F5 endpoint URL is empty")
+		return 0, E.New("endpoint URL is empty")
 	}
 	portText := serverURL.Port()
 	if portText == "" {
 		if strings.EqualFold(serverURL.Scheme, "https") {
 			return 443, nil
 		}
-		return 0, E.New("F5 endpoint has no port")
+		return 0, E.New("endpoint has no port")
 	}
 	port, parseErr := strconv.ParseUint(portText, 10, 16)
 	if parseErr != nil || port == 0 {
-		return 0, E.New("F5 endpoint has an invalid port: ", portText)
+		return 0, E.New("endpoint has an invalid port: ", portText)
 	}
 	return uint16(port), nil
 }
@@ -694,7 +715,7 @@ func (s *f5SessionState) attachSession(session *pppSession) error {
 		return ErrSessionRejected
 	}
 	if s.activeSession != nil && s.activeSession != session {
-		return E.New("F5 obtained session already owns an active tunnel")
+		return E.New("obtained session already owns an active tunnel")
 	}
 	s.activeSession = session
 	return nil
@@ -747,7 +768,7 @@ func (f *f5Frontend) logout(ctx context.Context, snapshot f5SessionSnapshot) err
 	logoutURL.Path = "/vdesk/hangup.php3"
 	logoutURL.RawPath = ""
 	logoutURL.RawQuery = "hangup_error=1"
-	logoutClient, transport, clientErr := f.newPinnedHTTPClient(snapshot)
+	logoutClient, transport, _, clientErr := f.newPinnedHTTPClient(snapshot)
 	if clientErr != nil {
 		return clientErr
 	}
@@ -772,23 +793,23 @@ func (f *f5Frontend) logout(ctx context.Context, snapshot f5SessionSnapshot) err
 		return E.Cause(closeErr, "close F5 logout response")
 	}
 	if readLength > f5MaximumAuthenticationBody {
-		return E.New("F5 logout response exceeds ", f5MaximumAuthenticationBody, " bytes")
+		return E.New("logout response exceeds ", f5MaximumAuthenticationBody, " bytes")
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return E.New("F5 logout returned HTTP ", response.StatusCode)
+		return E.New("logout returned HTTP ", response.StatusCode)
 	}
 	return nil
 }
 
 func (f *f5Frontend) newPinnedHTTPClient(
 	snapshot f5SessionSnapshot,
-) (*http.Client, *http.Transport, error) {
-	if snapshot.serverURL == nil || !snapshot.acceptedAddress.IsValid() || snapshot.jar == nil {
-		return nil, nil, E.New("F5 accepted endpoint is incomplete")
+) (*http.Client, *http.Transport, *pinnedHTTPPeer, error) {
+	if snapshot.serverURL == nil || snapshot.jar == nil {
+		return nil, nil, nil, E.New("accepted endpoint is incomplete")
 	}
 	expectedPort, portErr := f5URLPort(snapshot.serverURL)
 	if portErr != nil {
-		return nil, nil, portErr
+		return nil, nil, nil, portErr
 	}
 	f.client.httpTransport.CloseIdleConnections()
 	return newPinnedHTTPClient(f.client, snapshot.serverURL, snapshot.acceptedAddress, snapshot.jar, expectedPort, "F5")

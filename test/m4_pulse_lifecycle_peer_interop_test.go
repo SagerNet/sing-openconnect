@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -217,7 +218,7 @@ func TestM4PulseAbnormalEOFUsesHTTPSLogout(t *testing.T) {
 		t.Fatal(E.Cause(ctx.Err(), "wait for Pulse HTTPS logout"))
 	}
 	snapshot := peer.snapshot()
-	if snapshot.upgradeCount != 1 || snapshot.fullAuthCount != 1 || snapshot.reconnectCount != 0 ||
+	if snapshot.upgradeCount < 1 || snapshot.upgradeCount > 2 || snapshot.fullAuthCount != 1 || snapshot.reconnectCount != 0 ||
 		snapshot.gracefulCount != 0 || snapshot.logoutCount != 1 {
 		t.Fatalf("unexpected Pulse abnormal EOF lifecycle: %+v", snapshot)
 	}
@@ -362,6 +363,9 @@ func (p *m4PulseLifecyclePeer) exchange(conn net.Conn) (bool, error) {
 	reader := bufio.NewReader(conn)
 	request, err := http.ReadRequest(reader)
 	if err != nil {
+		if p.scenario == m4PulseLifecycleAbnormalLogout && (err == io.EOF || E.IsClosed(err)) {
+			return true, nil
+		}
 		return false, E.Cause(err, "read independent Pulse lifecycle HTTP request")
 	}
 	if request.URL.Path == "/dana-na/auth/logout.cgi" {
@@ -394,10 +398,21 @@ func (p *m4PulseLifecyclePeer) exchange(conn net.Conn) (bool, error) {
 			return false, E.New("independent Pulse lifecycle peer received an extra upgrade")
 		}
 	case m4PulseLifecycleAbnormalLogout:
-		if upgradeCount != 1 {
-			return false, E.New("Pulse abnormal EOF scenario unexpectedly reconnected")
+		switch upgradeCount {
+		case 1:
+			return p.exchangeFullAuthentication(conn, reader, m4PulseLifecycleInitialCookie, true)
+		case 2:
+			_, err = reader.ReadByte()
+			if err == nil {
+				return false, E.New("Pulse abnormal EOF reconnect sent data before the upgrade response")
+			}
+			if err != io.EOF && !E.IsClosed(err) {
+				return false, E.Cause(err, "wait for canceled Pulse abnormal EOF reconnect")
+			}
+			return true, nil
+		default:
+			return false, E.New("Pulse abnormal EOF scenario retried more than once")
 		}
-		return p.exchangeFullAuthentication(conn, reader, m4PulseLifecycleInitialCookie, true)
 	case m4PulseLifecycleAuthenticationCancellation:
 		if upgradeCount != 1 {
 			return false, E.New("stalled Pulse authentication unexpectedly reconnected")

@@ -76,9 +76,10 @@ func (s *fortinetSessionState) loadConfiguration(ctx context.Context) (*fortinet
 		if configurationErr != nil && classifyClientSessionError(configurationErr) != clientSessionErrorTerminal {
 			configurationErr = E.Errors(ErrSessionRejected, configurationErr)
 		}
-		if configurationErr == nil {
+		if configurationErr == nil && configuration != nil {
 			s.access.Lock()
 			s.svpnCookie = cookie
+			s.acceptedAddress = configuration.configuration.RemoteAddress
 			s.access.Unlock()
 		}
 		s.configuration = configuration
@@ -88,7 +89,7 @@ func (s *fortinetSessionState) loadConfiguration(ctx context.Context) (*fortinet
 		return nil, s.configurationErr
 	}
 	if s.configuration == nil {
-		return nil, markTerminal(E.New("Fortinet configuration fetch returned no configuration"))
+		return nil, markTerminal(E.New("configuration fetch returned no configuration"))
 	}
 	return s.configuration, nil
 }
@@ -97,7 +98,7 @@ func (f *fortinetFrontend) fetchTunnelConfiguration(
 	ctx context.Context,
 	snapshot fortinetSessionSnapshot,
 ) (*fortinetTunnelConfiguration, string, error) {
-	httpClient, transport, clientErr := f.newPinnedHTTPClient(snapshot)
+	httpClient, transport, peer, clientErr := f.newPinnedHTTPClient(snapshot)
 	if clientErr != nil {
 		return nil, "", clientErr
 	}
@@ -105,7 +106,9 @@ func (f *fortinetFrontend) fetchTunnelConfiguration(
 	configurationURL := cloneFortinetURL(snapshot.serverURL)
 	configurationURL.Path = "/remote/fortisslvpn_xml"
 	configurationURL.RawPath = ""
-	configurationURL.RawQuery = "dual_stack=1"
+	if !f.client.options.IPv6Disabled {
+		configurationURL.RawQuery = "dual_stack=1"
+	}
 	response, responseBody, requestErr := f.doConfigurationRequest(ctx, httpClient, configurationURL)
 	if requestErr != nil {
 		return nil, "", requestErr
@@ -123,18 +126,51 @@ func (f *fortinetFrontend) fetchTunnelConfiguration(
 		if locationErr == nil && strings.HasPrefix(location.Path, "/remote/login") {
 			return nil, "", ErrSessionRejected
 		}
-		return nil, "", markTerminal(E.New("Fortinet configuration returned an unexpected redirect"))
+		return nil, "", markTerminal(E.New("configuration returned an unexpected redirect"))
 	}
 	if response.StatusCode == http.StatusUnauthorized {
 		return nil, "", ErrSessionRejected
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, "", E.New("Fortinet configuration returned HTTP ", response.StatusCode)
+		return nil, "", E.New("configuration returned HTTP ", response.StatusCode)
 	}
 	configuration, parseErr := parseFortinetXMLConfiguration(responseBody, time.Now())
 	if parseErr != nil {
 		return nil, "", markTerminal(parseErr)
 	}
+	if f.client.options.IPv6Disabled {
+		configuration.wantIPv6 = false
+		configuration.proposedIPv6 = netip.Prefix{}
+		if !configuration.wantIPv4 {
+			return nil, "", markTerminal(E.New("server did not provide IPv4 tunnel configuration"))
+		}
+	}
+	if f.client.options.DPDInterval > 0 {
+		configuration.echoInterval = f.client.options.DPDInterval
+	}
+	acceptedAddress := peer.address
+	if !acceptedAddress.IsValid() {
+		return nil, "", markTerminal(E.New("configuration endpoint did not expose an accepted IP address"))
+	}
+	configuration.configuration.MTU = calculatePPPTunnelMTU(
+		f.client.options.MTU,
+		f.client.options.BaseMTU,
+		acceptedAddress.Is6(),
+		pppEncapsulationFortinet,
+	)
+	ipv6Disabled := f.client.options.IPv6Disabled || configuration.configuration.MTU < minimumIPv6MTU
+	if ipv6Disabled {
+		configuration.wantIPv6 = false
+		configuration.proposedIPv6 = netip.Prefix{}
+		if !configuration.wantIPv4 {
+			return nil, "", markTerminal(E.New("calculated tunnel MTU is too small for the server's IPv6-only configuration"))
+		}
+	}
+	configuration.configuration.RemoteAddress = acceptedAddress.Unmap()
+	configuration.configuration = normalizeTunnelConfiguration(
+		configuration.configuration,
+		ipv6Disabled,
+	)
 	tunnelURL := cloneFortinetURL(snapshot.serverURL)
 	tunnelURL.Path = "/remote/sslvpn-tunnel"
 	tunnelURL.RawPath = ""
@@ -180,7 +216,7 @@ func (f *fortinetFrontend) doConfigurationRequest(
 		return nil, nil, E.Cause(closeErr, "close Fortinet configuration response")
 	}
 	if len(responseBody) > fortinetMaximumAuthenticationBody {
-		return nil, nil, markTerminal(E.New("Fortinet configuration response exceeds ", fortinetMaximumAuthenticationBody, " bytes"))
+		return nil, nil, markTerminal(E.New("configuration response exceeds ", fortinetMaximumAuthenticationBody, " bytes"))
 	}
 	return response, responseBody, nil
 }
@@ -214,13 +250,13 @@ func parseFortinetXMLConfiguration(content []byte, now time.Time) (*fortinetTunn
 	var trailing fortinetXMLNode
 	trailingErr := decoder.Decode(&trailing)
 	if trailingErr == nil {
-		return nil, E.New("Fortinet VPN configuration contains trailing XML data")
+		return nil, E.New("VPN configuration contains trailing XML data")
 	}
 	if trailingErr != io.EOF {
-		return nil, E.Cause(trailingErr, "Fortinet VPN configuration contains trailing XML data")
+		return nil, E.Cause(trailingErr, "VPN configuration contains trailing XML data")
 	}
 	if root.name.Local != "sslvpn-tunnel" {
-		return nil, E.New("Fortinet VPN configuration has no sslvpn-tunnel root")
+		return nil, E.New("VPN configuration has no sslvpn-tunnel root")
 	}
 	configuration := &fortinetTunnelConfiguration{
 		configuration: TunnelConfiguration{MTU: pppDefaultTunnelMTU},
@@ -291,7 +327,7 @@ func parseFortinetXMLConfiguration(content []byte, now time.Time) (*fortinetTunn
 		})
 	}
 	if !configuration.wantIPv4 && !configuration.wantIPv6 {
-		return nil, E.New("Fortinet VPN configuration enables no usable network family")
+		return nil, E.New("VPN configuration enables no usable network family")
 	}
 	return configuration, nil
 }
@@ -406,18 +442,18 @@ func parseFortinetAssignedAddress(node *fortinetXMLNode, ipv6 bool) (netip.Prefi
 	}
 	value, loaded := node.attribute(attributeName)
 	if !loaded || strings.TrimSpace(value) == "" {
-		return netip.Prefix{}, E.New("Fortinet assigned address is empty")
+		return netip.Prefix{}, E.New("assigned address is empty")
 	}
 	address, parseErr := netip.ParseAddr(strings.TrimSpace(value))
 	if parseErr != nil || address.Is6() != ipv6 || ipv6 && address.Is4In6() {
-		return netip.Prefix{}, E.New("Fortinet assigned address is invalid: ", value)
+		return netip.Prefix{}, E.New("assigned address is invalid: ", value)
 	}
 	if ipv6 {
 		prefixValue, prefixLoaded := node.attribute("prefix-len")
 		if prefixLoaded {
 			parsedBits, bitsErr := strconv.Atoi(prefixValue)
 			if bitsErr != nil || parsedBits < 0 || parsedBits > 128 {
-				return netip.Prefix{}, E.New("Fortinet assigned IPv6 prefix is invalid: ", prefixValue)
+				return netip.Prefix{}, E.New("assigned IPv6 prefix is invalid: ", prefixValue)
 			}
 			bits = parsedBits
 		}
@@ -443,7 +479,7 @@ func parseFortinetDNS(
 	}
 	address, parseErr := netip.ParseAddr(strings.TrimSpace(value))
 	if parseErr != nil || address.Is6() != ipv6 || ipv6 && address.Is4In6() {
-		return E.New("Fortinet DNS address is invalid: ", value)
+		return E.New("DNS address is invalid: ", value)
 	}
 	if len(configuration.configuration.DNS) < 3 {
 		configuration.configuration.DNS = append(configuration.configuration.DNS, address.Unmap())
@@ -454,14 +490,14 @@ func parseFortinetDNS(
 func parseFortinetSplitDNS(node *fortinetXMLNode, ipv6 bool) (TunnelSplitDNSRule, error) {
 	domainsValue, domainsLoaded := node.attribute("domains")
 	if !domainsLoaded || strings.TrimSpace(domainsValue) == "" {
-		return TunnelSplitDNSRule{}, E.New("Fortinet split-DNS rule omitted domains")
+		return TunnelSplitDNSRule{}, E.New("split-DNS rule omitted domains")
 	}
 	var rule TunnelSplitDNSRule
 	domainSet := make(map[string]struct{})
 	for domain := range strings.SplitSeq(domainsValue, ",") {
 		domain = strings.TrimSpace(domain)
 		if domain == "" {
-			return TunnelSplitDNSRule{}, E.New("Fortinet split-DNS rule contains an empty domain")
+			return TunnelSplitDNSRule{}, E.New("split-DNS rule contains an empty domain")
 		}
 		if _, exists := domainSet[domain]; exists {
 			continue
@@ -477,7 +513,7 @@ func parseFortinetSplitDNS(node *fortinetXMLNode, ipv6 bool) (TunnelSplitDNSRule
 		}
 		index, parseErr := strconv.Atoi(strings.TrimPrefix(attribute.Name.Local, "dnsserver"))
 		if parseErr != nil || index < 1 || index > 9 {
-			return TunnelSplitDNSRule{}, E.New("Fortinet split-DNS server attribute is invalid: ", attribute.Name.Local)
+			return TunnelSplitDNSRule{}, E.New("split-DNS server attribute is invalid: ", attribute.Name.Local)
 		}
 		if _, exists := indexedServers[index]; exists {
 			return TunnelSplitDNSRule{}, E.New("duplicate Fortinet split-DNS server attribute: ", attribute.Name.Local)
@@ -492,11 +528,11 @@ func parseFortinetSplitDNS(node *fortinetXMLNode, ipv6 bool) (TunnelSplitDNSRule
 	for serverIndex := 1; serverIndex <= highestNonemptyServer; serverIndex++ {
 		serverValue, exists := indexedServers[serverIndex]
 		if !exists || serverValue == "" {
-			return TunnelSplitDNSRule{}, E.New("Fortinet split-DNS servers are empty or non-contiguous")
+			return TunnelSplitDNSRule{}, E.New("split-DNS servers are empty or non-contiguous")
 		}
 		address, parseErr := netip.ParseAddr(serverValue)
 		if parseErr != nil || address.Is6() != ipv6 || ipv6 && address.Is4In6() {
-			return TunnelSplitDNSRule{}, E.New("Fortinet split-DNS server is invalid: ", serverValue)
+			return TunnelSplitDNSRule{}, E.New("split-DNS server is invalid: ", serverValue)
 		}
 		address = address.Unmap()
 		if _, exists := serverSet[address]; exists {
@@ -506,7 +542,7 @@ func parseFortinetSplitDNS(node *fortinetXMLNode, ipv6 bool) (TunnelSplitDNSRule
 		rule.Servers = append(rule.Servers, address)
 	}
 	if len(rule.Servers) == 0 {
-		return TunnelSplitDNSRule{}, E.New("Fortinet split-DNS rule omitted dedicated servers")
+		return TunnelSplitDNSRule{}, E.New("split-DNS rule omitted dedicated servers")
 	}
 	return rule, nil
 }
@@ -516,29 +552,29 @@ func parseFortinetRoute(node *fortinetXMLNode, ipv6 bool) (netip.Prefix, error) 
 		addressValue, addressLoaded := node.attribute("ipv6")
 		prefixValue, prefixLoaded := node.attribute("prefix-len")
 		if !addressLoaded || !prefixLoaded {
-			return netip.Prefix{}, E.New("Fortinet IPv6 route omitted address or prefix")
+			return netip.Prefix{}, E.New("IPv6 route omitted address or prefix")
 		}
 		address, parseErr := netip.ParseAddr(strings.TrimSpace(addressValue))
 		bits, bitsErr := strconv.Atoi(strings.TrimSpace(prefixValue))
 		if parseErr != nil || !address.Is6() || address.Is4In6() || bitsErr != nil || bits < 0 || bits > 128 {
-			return netip.Prefix{}, E.New("Fortinet IPv6 route is invalid: ", addressValue, "/", prefixValue)
+			return netip.Prefix{}, E.New("IPv6 route is invalid: ", addressValue, "/", prefixValue)
 		}
 		return netip.PrefixFrom(address, bits).Masked(), nil
 	}
 	addressValue, addressLoaded := node.attribute("ip")
 	maskValue, maskLoaded := node.attribute("mask")
 	if !addressLoaded || !maskLoaded {
-		return netip.Prefix{}, E.New("Fortinet IPv4 route omitted address or mask")
+		return netip.Prefix{}, E.New("IPv4 route omitted address or mask")
 	}
 	address, parseErr := netip.ParseAddr(strings.TrimSpace(addressValue))
 	maskAddress, maskErr := netip.ParseAddr(strings.TrimSpace(maskValue))
 	if parseErr != nil || !address.Is4() || maskErr != nil || !maskAddress.Is4() {
-		return netip.Prefix{}, E.New("Fortinet IPv4 route is invalid: ", addressValue, "/", maskValue)
+		return netip.Prefix{}, E.New("IPv4 route is invalid: ", addressValue, "/", maskValue)
 	}
 	maskBytes := maskAddress.As4()
 	bits, width := net.IPMask(maskBytes[:]).Size()
 	if width != 32 || bits < 0 {
-		return netip.Prefix{}, E.New("Fortinet IPv4 route mask is not contiguous: ", maskValue)
+		return netip.Prefix{}, E.New("IPv4 route mask is not contiguous: ", maskValue)
 	}
 	return netip.PrefixFrom(address, bits).Masked(), nil
 }
@@ -577,7 +613,7 @@ func parseFortinetDurationSeconds(value string) (time.Duration, error) {
 		return 0, parseErr
 	}
 	if seconds > math.MaxInt64/int64(time.Second) {
-		return 0, E.New("Fortinet duration exceeds time.Duration: ", value)
+		return 0, E.New("duration exceeds time.Duration: ", value)
 	}
 	return time.Duration(seconds) * time.Second, nil
 }
@@ -630,11 +666,11 @@ func buildFortinetTLSConnectRequest(requestURL *url.URL, jar http.CookieJar) ([]
 		hostHeader = "[" + hostHeader + "]"
 	}
 	if strings.ContainsAny(hostHeader, "\r\n") {
-		return nil, E.New("Fortinet tunnel Host contains a line break")
+		return nil, E.New("tunnel Host contains a line break")
 	}
 	cookies := jar.Cookies(requestURL)
 	if len(cookies) == 0 {
-		return nil, E.New("Fortinet tunnel request has no cookies")
+		return nil, E.New("tunnel request has no cookies")
 	}
 	var builder strings.Builder
 	builder.WriteString("GET /remote/sslvpn-tunnel HTTP/1.1\r\nHost: ")
@@ -644,7 +680,7 @@ func buildFortinetTLSConnectRequest(requestURL *url.URL, jar http.CookieJar) ([]
 	builder.WriteString("\r\nCookie: ")
 	for cookieIndex, cookie := range cookies {
 		if cookie.Name == "" || strings.ContainsAny(cookie.Name+cookie.Value, "\r\n;") {
-			return nil, E.New("Fortinet tunnel cookie contains invalid request characters")
+			return nil, E.New("tunnel cookie contains invalid request characters")
 		}
 		if cookieIndex > 0 {
 			builder.WriteString("; ")
@@ -659,12 +695,12 @@ func buildFortinetTLSConnectRequest(requestURL *url.URL, jar http.CookieJar) ([]
 
 func buildFortinetDTLSConnectRequest(cookie string) ([]byte, error) {
 	if cookie == "" || strings.IndexByte(cookie, 0) >= 0 {
-		return nil, E.New("Fortinet DTLS cookie is empty or contains NUL")
+		return nil, E.New("DTLS cookie is empty or contains NUL")
 	}
 	prefix := []byte("GFtype\x00clthello\x00SVPNCOOKIE\x00")
 	totalLength := 2 + len(prefix) + len(cookie) + 1
 	if totalLength > 65535 {
-		return nil, E.New("Fortinet DTLS client hello exceeds its length field")
+		return nil, E.New("DTLS client hello exceeds its length field")
 	}
 	request := make([]byte, totalLength)
 	binary.BigEndian.PutUint16(request[:2], uint16(totalLength))

@@ -11,7 +11,6 @@ import (
 	"net/http/httptrace"
 	"net/netip"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,7 +27,7 @@ const (
 	ncMaximumAuthenticationRequests  = 64
 	ncMaximumAuthenticationRedirects = 10
 	ncLogoutTimeout                  = 5 * time.Second
-	ncDefaultUserAgent               = "AnyConnect-compatible OpenConnect VPN Agent"
+	ncDefaultUserAgent               = "AnyConnect-compatible OpenConnect VPN Agent " + defaultClientVersion
 )
 
 type ncFrontend struct {
@@ -96,18 +95,11 @@ func init() {
 }
 
 func newNCFrontend(client *Client) (*ncFrontend, error) {
-	localHostname, err := os.Hostname()
-	if err != nil {
-		return nil, E.Cause(err, "read local hostname for Network Connect identity")
-	}
-	if localHostname == "" {
-		return nil, E.New("local hostname for Network Connect identity is empty")
-	}
-	err = validateNCTNCCOptions(client.options.TNCC)
+	err := validateNCTNCCOptions(client.options.TNCC)
 	if err != nil {
 		return nil, err
 	}
-	return &ncFrontend{client: client, localHostname: localHostname}, nil
+	return &ncFrontend{client: client, localHostname: client.options.LocalHostname}, nil
 }
 
 func validateNCTNCCOptions(options *TNCCOptions) error {
@@ -115,19 +107,19 @@ func validateNCTNCCOptions(options *TNCCOptions) error {
 		return nil
 	}
 	if strings.ContainsAny(options.DeviceID, ";\r\n") {
-		return E.New("Network Connect TNCC device ID contains a protocol delimiter")
+		return E.New("TNCC device ID contains a protocol delimiter")
 	}
 	if strings.ContainsAny(options.UserAgent, "\r\n") {
-		return E.New("Network Connect TNCC user agent contains a line delimiter")
+		return E.New("TNCC user agent contains a line delimiter")
 	}
 	if options.WrapperPath != "" && (options.DeviceID != "" || options.UserAgent != "" || options.MachineIdentificationEnabled || len(options.Certificates) > 0) {
 		return E.New("external Network Connect TNCC wrapper options cannot be combined with built-in TNCC identity options")
 	}
 	if len(options.Certificates) > 0 && !options.MachineIdentificationEnabled {
-		return E.New("Network Connect TNCC certificates require machine identification")
+		return E.New("TNCC certificates require machine identification")
 	}
 	for certificateIndex, certificate := range options.Certificates {
-		err := certificate.Validate("Network Connect TNCC certificate " + strconv.Itoa(certificateIndex))
+		err := certificate.Validate("TNCC certificate " + strconv.Itoa(certificateIndex))
 		if err != nil {
 			return err
 		}
@@ -137,10 +129,28 @@ func validateNCTNCCOptions(options *TNCCOptions) error {
 
 func (f *ncFrontend) BeginAuthentication() authContinuation {
 	f.client.httpTransport.CloseIdleConnections()
+	serverURL := cloneNCURL(f.client.serverURL)
+	directCookie := f.client.takeDirectCookie()
+	if directCookie != "" {
+		jar, values, directErr := newDirectCookieJar(serverURL, directCookie, "DSID")
+		dsid := values["DSID"]
+		if directErr == nil && dsid == "" {
+			directErr = E.New("direct cookie does not contain DSID")
+		}
+		return &completedAuthentication{
+			session: &ncSessionState{
+				frontend:  f,
+				serverURL: serverURL,
+				jar:       jar,
+				dsid:      dsid,
+			},
+			err: directErr,
+		}
+	}
 	jar, initializationErr := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
 	transport := f.client.httpTransport.Clone()
 	authenticationClient := &http.Client{
-		Transport: transport,
+		Transport: f.client.wrapHTTPTransport(transport),
 		Jar:       jar,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -152,7 +162,7 @@ func (f *ncFrontend) BeginAuthentication() authContinuation {
 		httpClient:        authenticationClient,
 		transport:         transport,
 		jar:               jar,
-		currentURL:        cloneNCURL(f.client.serverURL),
+		currentURL:        serverURL,
 		tokenGenerator:    newSoftwareTokenGenerator(f.client.options.Token),
 	}
 }
@@ -160,10 +170,10 @@ func (f *ncFrontend) BeginAuthentication() authContinuation {
 func (f *ncFrontend) ConnectTunnel(ctx context.Context, obtained obtainedSession) (clientSession, error) {
 	state, valid := obtained.(*ncSessionState)
 	if !valid || state == nil || state.frontend != f {
-		return nil, markTerminal(E.Extend(ErrProtocolNotSupported, "Network Connect received an invalid obtained session"))
+		return nil, markTerminal(E.Extend(ErrProtocolNotSupported, "received an invalid obtained session"))
 	}
 	snapshot := state.snapshot()
-	if snapshot.serverURL == nil || !snapshot.acceptedAddress.IsValid() || snapshot.jar == nil || snapshot.dsid == "" {
+	if snapshot.serverURL == nil || snapshot.jar == nil || snapshot.dsid == "" {
 		return nil, ErrSessionRejected
 	}
 	sessionContext, cancelSession := context.WithCancel(ctx)
@@ -227,11 +237,11 @@ func (a *ncAuthentication) Advance(
 	}
 	if a.completed {
 		a.access.Unlock()
-		return nil, nil, E.Extend(ErrProtocolNotSupported, "Network Connect authentication continuation is already complete")
+		return nil, nil, E.Extend(ErrProtocolNotSupported, "authentication continuation is already complete")
 	}
 	if a.advancing {
 		a.access.Unlock()
-		return nil, nil, E.Extend(ErrProtocolNotSupported, "Network Connect authentication continuation is already advancing")
+		return nil, nil, E.Extend(ErrProtocolNotSupported, "authentication continuation is already advancing")
 	}
 	a.advancing = true
 	started := a.started
@@ -261,7 +271,7 @@ func (a *ncAuthentication) Advance(
 	if currentForm.roleForm {
 		selectedRole, loaded := response.Values[currentForm.fields[0].submissionKey]
 		if !loaded || !authFormChoiceContains(currentForm.fields[0].options, selectedRole) {
-			return nil, nil, E.Extend(ErrProtocolNotSupported, "Network Connect role response selected an unknown role")
+			return nil, nil, E.Extend(ErrProtocolNotSupported, "role response selected an unknown role")
 		}
 		resolvedURL, resolveErr := requestURL.Parse(selectedRole)
 		if resolveErr != nil {
@@ -315,7 +325,7 @@ func (a *ncAuthentication) doAuthenticationExchange(
 	currentBody := encodedForm
 	for redirectNumber := 0; ; redirectNumber++ {
 		if redirectNumber > ncMaximumAuthenticationRedirects {
-			return nil, nil, markTerminal(E.New("Network Connect authentication exceeded ", ncMaximumAuthenticationRedirects, " redirects"))
+			return nil, nil, markTerminal(E.New("authentication exceeded ", ncMaximumAuthenticationRedirects, " redirects"))
 		}
 		httpResponse, err := a.doAuthenticationRequest(ctx, currentMethod, currentURL, currentBody)
 		if err != nil {
@@ -348,7 +358,7 @@ func (a *ncAuthentication) doAuthenticationExchange(
 			return nil, nil, classifyNCAuthenticationHTTPStatus(httpResponse.statusCode)
 		}
 		if len(httpResponse.body) == 0 {
-			return nil, nil, markTerminal(E.New("Network Connect authentication returned an empty response body"))
+			return nil, nil, markTerminal(E.New("authentication returned an empty response body"))
 		}
 		form, parseErr := parseNCAuthenticationDocument(httpResponse.body)
 		if parseErr != nil {
@@ -369,7 +379,7 @@ func (a *ncAuthentication) doAuthenticationExchange(
 				currentBody = ""
 				continue
 			}
-			return nil, nil, markTerminal(E.New("Network Connect authentication response has no usable form"))
+			return nil, nil, markTerminal(E.New("authentication response has no usable form"))
 		}
 		err = validateNCAuthenticationForm(form)
 		if err != nil {
@@ -403,7 +413,7 @@ func (a *ncAuthentication) startTNCC(
 	}
 	if updatedCookie == "" {
 		_ = runner.Close()
-		return markTerminal(E.New("Network Connect TNCC returned an empty DSPREAUTH cookie"))
+		return markTerminal(E.New("TNCC returned an empty DSPREAUTH cookie"))
 	}
 	setNCCookie(a.jar, response.requestURL, "DSPREAUTH", updatedCookie)
 	a.access.Lock()
@@ -424,7 +434,7 @@ func (a *ncAuthentication) sessionFromCookies(ctx context.Context, response ncHT
 	if runner != nil {
 		preauthenticationCookie := ncCookieValue(a.jar, response.requestURL, "DSPREAUTH")
 		if preauthenticationCookie == "" {
-			return nil, markTerminal(E.New("Network Connect session obtained DSID without the TNCC DSPREAUTH cookie"))
+			return nil, markTerminal(E.New("session obtained DSID without the TNCC DSPREAUTH cookie"))
 		}
 		err := runner.SetCookie(ctx, preauthenticationCookie)
 		if err != nil {
@@ -432,7 +442,7 @@ func (a *ncAuthentication) sessionFromCookies(ctx context.Context, response ncHT
 		}
 	}
 	if !response.address.IsValid() {
-		return nil, markTerminal(E.New("Network Connect authentication did not record the accepted gateway address"))
+		return nil, markTerminal(E.New("authentication did not record the accepted gateway address"))
 	}
 	state := &ncSessionState{
 		frontend:        a.frontend,
@@ -462,7 +472,7 @@ func (a *ncAuthentication) doAuthenticationRequest(
 	requestNumber := a.requests
 	a.access.Unlock()
 	if requestNumber > ncMaximumAuthenticationRequests {
-		return ncHTTPResponse{}, markTerminal(E.New("Network Connect authentication exceeded ", ncMaximumAuthenticationRequests, " wire requests"))
+		return ncHTTPResponse{}, markTerminal(E.New("authentication exceeded ", ncMaximumAuthenticationRequests, " wire requests"))
 	}
 	var body io.Reader
 	if method == http.MethodPost {
@@ -507,7 +517,7 @@ func (a *ncAuthentication) doAuthenticationRequest(
 		return ncHTTPResponse{}, E.Cause(closeErr, "close Network Connect authentication response")
 	}
 	if len(responseBody) > ncMaximumAuthenticationBody {
-		return ncHTTPResponse{}, markTerminal(E.New("Network Connect authentication response exceeds ", ncMaximumAuthenticationBody, " bytes"))
+		return ncHTTPResponse{}, markTerminal(E.New("authentication response exceeds ", ncMaximumAuthenticationBody, " bytes"))
 	}
 	var peerCertificate *x509.Certificate
 	if response.TLS != nil && len(response.TLS.PeerCertificates) > 0 {
@@ -541,7 +551,7 @@ func validateNCAuthenticationForm(form *ncAuthenticationForm) error {
 		return nil
 	default:
 		if strings.Contains(form.action, "remediate.cgi") {
-			return markTerminal(E.New("Network Connect TNCC or Host Checker failed; remediation form returned by gateway"))
+			return markTerminal(E.New("TNCC or Host Checker failed; remediation form returned by gateway"))
 		}
 		return markTerminal(E.New("unknown Network Connect authentication form: ", form.id))
 	}
@@ -563,7 +573,7 @@ func (a *ncAuthentication) authenticationRequestFromForm(form *ncAuthenticationF
 		Message: form.message,
 	}
 	if repeatedPrimary {
-		request.Error = "Network Connect gateway rejected the primary credentials"
+		request.Error = "gateway rejected the primary credentials"
 		request.ClearCacheKeys = []string{authCachePassword}
 	}
 	passwordNumber := 0
@@ -653,7 +663,7 @@ func encodeNCAuthenticationResponse(form *ncAuthenticationForm, response *authen
 	for fieldIndex, field := range form.fields {
 		value, loaded := response.Values[field.submissionKey]
 		if !loaded {
-			return "", E.Extend(ErrProtocolNotSupported, "Network Connect authentication response omitted field ", field.name)
+			return "", E.Extend(ErrProtocolNotSupported, "authentication response omitted field ", field.name)
 		}
 		if fieldIndex > 0 {
 			encoded.WriteByte('&')
@@ -666,7 +676,7 @@ func encodeNCAuthenticationResponse(form *ncAuthenticationForm, response *authen
 }
 
 func classifyNCAuthenticationHTTPStatus(statusCode int) error {
-	statusErr := E.New("Network Connect authentication returned HTTP ", statusCode)
+	statusErr := E.New("authentication returned HTTP ", statusCode)
 	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
 		return newRetryableAuthenticationError(E.Errors(ErrAuthenticationFailed, statusErr), authCachePassword)
 	}
@@ -691,7 +701,7 @@ func (s *ncSessionState) attachSession(session clientSession) error {
 		return ErrSessionRejected
 	}
 	if s.activeSession != nil && s.activeSession != session {
-		return E.New("Network Connect obtained session already owns an active tunnel")
+		return E.New("obtained session already owns an active tunnel")
 	}
 	s.activeSession = session
 	return nil
@@ -712,6 +722,9 @@ func (s *ncSessionState) tnccInterval() time.Duration {
 	if runner == nil {
 		return 0
 	}
+	if s.frontend.client.options.TrojanInterval > 0 {
+		return s.frontend.client.options.TrojanInterval
+	}
 	return runner.Interval()
 }
 
@@ -726,7 +739,7 @@ func (s *ncSessionState) runPeriodicTNCC(ctx context.Context) error {
 	}
 	preauthenticationCookie := ncCookieValue(jar, serverURL, "DSPREAUTH")
 	if preauthenticationCookie == "" {
-		return markTerminal(E.New("Network Connect periodic TNCC check has no DSPREAUTH cookie"))
+		return markTerminal(E.New("periodic TNCC check has no DSPREAUTH cookie"))
 	}
 	return runner.SetCookie(ctx, preauthenticationCookie)
 }
@@ -774,7 +787,7 @@ func (f *ncFrontend) logout(ctx context.Context, snapshot ncSessionSnapshot) err
 	logoutURL.RawQuery = ""
 	logoutURL.ForceQuery = false
 	logoutURL.Fragment = ""
-	logoutClient, transport, err := newNCPinnedHTTPClient(f.client, snapshot.serverURL, snapshot.acceptedAddress, snapshot.jar)
+	logoutClient, transport, _, err := newNCPinnedHTTPClient(f.client, snapshot.serverURL, snapshot.acceptedAddress, snapshot.jar)
 	if err != nil {
 		return err
 	}
@@ -799,10 +812,10 @@ func (f *ncFrontend) logout(ctx context.Context, snapshot ncSessionSnapshot) err
 		return E.Cause(closeErr, "close Network Connect logout response")
 	}
 	if readLength > ncMaximumAuthenticationBody {
-		return E.New("Network Connect logout response exceeds ", ncMaximumAuthenticationBody, " bytes")
+		return E.New("logout response exceeds ", ncMaximumAuthenticationBody, " bytes")
 	}
 	if response.StatusCode != http.StatusOK {
-		return E.New("Network Connect logout returned HTTP ", response.StatusCode)
+		return E.New("logout returned HTTP ", response.StatusCode)
 	}
 	return nil
 }
@@ -812,13 +825,13 @@ func newNCPinnedHTTPClient(
 	serverURL *url.URL,
 	acceptedAddress netip.Addr,
 	jar http.CookieJar,
-) (*http.Client, *http.Transport, error) {
-	if serverURL == nil || !acceptedAddress.IsValid() || jar == nil {
-		return nil, nil, E.New("Network Connect accepted endpoint is incomplete")
+) (*http.Client, *http.Transport, *pinnedHTTPPeer, error) {
+	if serverURL == nil || jar == nil {
+		return nil, nil, nil, E.New("accepted endpoint is incomplete")
 	}
 	expectedPort, err := ncURLPort(serverURL)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	return newPinnedHTTPClient(client, serverURL, acceptedAddress, jar, expectedPort, "Network Connect")
 }
@@ -833,7 +846,7 @@ func cloneNCURL(serverURL *url.URL) *url.URL {
 
 func ncURLPort(serverURL *url.URL) (uint16, error) {
 	if serverURL == nil {
-		return 0, E.New("Network Connect URL is missing")
+		return 0, E.New("URL is missing")
 	}
 	portText := serverURL.Port()
 	if portText == "" {
@@ -841,7 +854,7 @@ func ncURLPort(serverURL *url.URL) (uint16, error) {
 	}
 	port, err := strconv.ParseUint(portText, 10, 16)
 	if err != nil || port == 0 {
-		return 0, E.New("Network Connect URL has an invalid port")
+		return 0, E.New("URL has an invalid port")
 	}
 	return uint16(port), nil
 }

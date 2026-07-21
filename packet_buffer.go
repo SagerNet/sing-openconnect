@@ -42,10 +42,6 @@ func requirePacketBufferCapacity(packetBuffer *buf.Buffer, headroom int, rearRoo
 	return newBuffer
 }
 
-func writePacketBufferSequence(w io.Writer, packetBuffers []*buf.Buffer) error {
-	return writeByteSequence(w, buf.ToSliceMulti(packetBuffers))
-}
-
 func writeByteSequence(w io.Writer, content [][]byte) error {
 	expected := 0
 	for _, data := range content {

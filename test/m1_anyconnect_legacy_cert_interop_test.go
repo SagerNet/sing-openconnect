@@ -25,6 +25,7 @@ type m1LegacyFallbackMode string
 const (
 	m1LegacyFallbackHTTPRejection m1LegacyFallbackMode = "http-rejection"
 	m1LegacyFallbackLocalRedirect m1LegacyFallbackMode = "local-redirect"
+	m1LegacyFallbackXMLDisabled   m1LegacyFallbackMode = "xmlpost-disabled"
 )
 
 type m1LegacyFallbackPeer struct {
@@ -91,6 +92,7 @@ func TestM1AnyConnectLegacyFallbackInterop(t *testing.T) {
 	for _, fallbackMode := range []m1LegacyFallbackMode{
 		m1LegacyFallbackHTTPRejection,
 		m1LegacyFallbackLocalRedirect,
+		m1LegacyFallbackXMLDisabled,
 	} {
 		t.Run(string(fallbackMode), func(t *testing.T) {
 			t.Parallel()
@@ -107,7 +109,10 @@ func TestM1AnyConnectLegacyFallbackInterop(t *testing.T) {
 			server.StartTLS()
 			t.Cleanup(server.Close)
 
-			client := newM1AnyConnectClient(t, ctx, server.URL+"/vpn/start", openconnect.ClientOptions{NoUDP: true})
+			client := newM1AnyConnectClient(t, ctx, server.URL+"/vpn/start", openconnect.ClientOptions{
+				NoUDP:           true,
+				XMLPostDisabled: fallbackMode == m1LegacyFallbackXMLDisabled,
+			})
 			startM1Client(t, client)
 			form := waitForM1AuthForm(t, ctx, client)
 			if form.Browser != nil || form.Form == nil || len(form.Form.Fields) != 3 {
@@ -148,7 +153,11 @@ func TestM1AnyConnectLegacyFallbackInterop(t *testing.T) {
 			legacyFormSubmissions := peer.legacyFormSubmissions
 			phase := peer.phase
 			peer.access.Unlock()
-			if initialRequests != 1 || legacyRequests != 1 || legacyFormSubmissions != 1 || phase != 3 {
+			expectedInitialRequests := 1
+			if fallbackMode == m1LegacyFallbackXMLDisabled {
+				expectedInitialRequests = 0
+			}
+			if initialRequests != expectedInitialRequests || legacyRequests != 1 || legacyFormSubmissions != 1 || phase != 3 {
 				t.Fatalf(
 					"incomplete legacy exchange: initial=%d get=%d form=%d phase=%d",
 					initialRequests,
@@ -444,7 +453,11 @@ func (peer *m1LegacyFallbackPeer) ServeHTTP(writer http.ResponseWriter, request 
 			return
 		}
 		peer.access.Lock()
-		validPhase := peer.phase == 1
+		expectedPhase := 1
+		if peer.mode == m1LegacyFallbackXMLDisabled {
+			expectedPhase = 0
+		}
+		validPhase := peer.phase == expectedPhase
 		peer.phase = 2
 		peer.legacyRequests++
 		peer.access.Unlock()

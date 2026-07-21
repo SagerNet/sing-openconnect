@@ -19,7 +19,7 @@ type anyConnectLegacyCipher struct {
 	id          uint16
 	keyLength   int
 	blockLength int
-	tripleDES   bool
+	newBlock    func(key []byte) (cipher.Block, error)
 }
 
 func (c anyConnectLegacyCipher) suite() legacyDTLSSuite {
@@ -34,13 +34,37 @@ func (c anyConnectLegacyCipher) suite() legacyDTLSSuite {
 func anyConnectLegacyCipherForName(name string, allowInsecureCrypto bool) (anyConnectLegacyCipher, error) {
 	switch name {
 	case "DHE-RSA-AES128-SHA":
-		return anyConnectLegacyCipher{name: name, id: 0x0033, keyLength: 16, blockLength: aes.BlockSize}, nil
+		return anyConnectLegacyCipher{
+			name:        name,
+			id:          0x0033,
+			keyLength:   16,
+			blockLength: aes.BlockSize,
+			newBlock:    aes.NewCipher,
+		}, nil
 	case "DHE-RSA-AES256-SHA":
-		return anyConnectLegacyCipher{name: name, id: 0x0039, keyLength: 32, blockLength: aes.BlockSize}, nil
+		return anyConnectLegacyCipher{
+			name:        name,
+			id:          0x0039,
+			keyLength:   32,
+			blockLength: aes.BlockSize,
+			newBlock:    aes.NewCipher,
+		}, nil
 	case "AES128-SHA":
-		return anyConnectLegacyCipher{name: name, id: 0x002f, keyLength: 16, blockLength: aes.BlockSize}, nil
+		return anyConnectLegacyCipher{
+			name:        name,
+			id:          0x002f,
+			keyLength:   16,
+			blockLength: aes.BlockSize,
+			newBlock:    aes.NewCipher,
+		}, nil
 	case "AES256-SHA":
-		return anyConnectLegacyCipher{name: name, id: 0x0035, keyLength: 32, blockLength: aes.BlockSize}, nil
+		return anyConnectLegacyCipher{
+			name:        name,
+			id:          0x0035,
+			keyLength:   32,
+			blockLength: aes.BlockSize,
+			newBlock:    aes.NewCipher,
+		}, nil
 	case "DES-CBC3-SHA":
 		if !allowInsecureCrypto {
 			return anyConnectLegacyCipher{}, E.Extend(ErrDeprecatedCryptoDisabled, "DTLS cipher ", name)
@@ -50,18 +74,22 @@ func anyConnectLegacyCipherForName(name string, allowInsecureCrypto bool) (anyCo
 			id:          0x000a,
 			keyLength:   24,
 			blockLength: des.BlockSize,
-			tripleDES:   true,
+			newBlock:    des.NewTripleDESCipher,
+		}, nil
+	case "DES-CBC-SHA":
+		if !allowInsecureCrypto {
+			return anyConnectLegacyCipher{}, E.Extend(ErrDeprecatedCryptoDisabled, "DTLS cipher ", name)
+		}
+		return anyConnectLegacyCipher{
+			name:        name,
+			id:          0x0009,
+			keyLength:   8,
+			blockLength: des.BlockSize,
+			newBlock:    des.NewCipher,
 		}, nil
 	default:
 		return anyConnectLegacyCipher{}, E.Extend(ErrProtocolNotSupported, "Cisco DTLS 0.9 cipher ", name)
 	}
-}
-
-func (c anyConnectLegacyCipher) newBlock(key []byte) (cipher.Block, error) {
-	if c.tripleDES {
-		return des.NewTripleDESCipher(key)
-	}
-	return aes.NewCipher(key)
 }
 
 func anyConnectLegacyFinished(masterSecret []byte, label string, transcript []byte) ([]byte, error) {

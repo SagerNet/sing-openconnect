@@ -52,6 +52,7 @@ type m2GPAuthPeerScenario struct {
 	selectedLabel             string
 	samlMethod                string
 	samlCookieHeader          string
+	externalAuthDisabled      bool
 	reauthenticateAfterTunnel bool
 }
 
@@ -122,6 +123,11 @@ func TestM2GlobalProtectAuthenticationPeerInterop(t *testing.T) {
 			authGroup:                 "selected-gateway",
 			reauthenticateAfterTunnel: true,
 		},
+		{
+			name:                 "external-auth-disabled",
+			authGroup:            "selected-gateway",
+			externalAuthDisabled: true,
+		},
 	}
 	for _, scenario := range scenarios {
 		testScenario := scenario
@@ -183,15 +189,16 @@ func runM2GPAuthPeerScenario(t *testing.T, scenario m2GPAuthPeerScenario) {
 	}
 
 	options := openconnect.ClientOptions{
-		Context:   ctx,
-		Server:    peer.portalURL + "/portal",
-		Flavor:    openconnect.FlavorGP,
-		Username:  m2GPAuthPeerNormalUser,
-		Password:  m2GPAuthPeerNormalPassword,
-		AuthGroup: scenario.authGroup,
-		UserAgent: m2GPAuthPeerUserAgent,
-		NoUDP:     true,
-		Dialer:    peer.dialer,
+		Context:              ctx,
+		Server:               peer.portalURL + "/portal",
+		Flavor:               openconnect.FlavorGP,
+		Username:             m2GPAuthPeerNormalUser,
+		Password:             m2GPAuthPeerNormalPassword,
+		AuthGroup:            scenario.authGroup,
+		UserAgent:            m2GPAuthPeerUserAgent,
+		NoUDP:                true,
+		ExternalAuthDisabled: scenario.externalAuthDisabled,
+		Dialer:               peer.dialer,
 		TLSConfig: openconnect.ClientTLSOptions{
 			CertificateAuthority: openconnect.Material{Content: rootCertificate},
 		},
@@ -282,8 +289,10 @@ func (p *m2GPAuthPeer) servePortal(writer http.ResponseWriter, request *http.Req
 			p.fail(writer, E.Cause(err, "parse GlobalProtect portal prelogin form"))
 			return
 		}
-		if request.PostForm.Get("cas-support") != "yes" {
-			p.fail(writer, E.New("GlobalProtect portal prelogin omitted cas-support"))
+		casSupport := request.PostForm.Get("cas-support")
+		if p.scenario.externalAuthDisabled && casSupport != "" ||
+			!p.scenario.externalAuthDisabled && casSupport != "yes" {
+			p.fail(writer, E.New("GlobalProtect portal prelogin used unexpected cas-support value: ", casSupport))
 			return
 		}
 		http.SetCookie(writer, &http.Cookie{Name: "portal-origin", Value: "must-not-cross-port", Path: "/", Secure: true})

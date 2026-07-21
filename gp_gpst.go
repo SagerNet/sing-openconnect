@@ -238,7 +238,7 @@ func (c *gpstChannel) connect() (*tls.Conn, error) {
 	gatewayPortText := effectiveGPPort(c.config.Snapshot.serverURL)
 	gatewayPort, err := strconv.ParseUint(gatewayPortText, 10, 16)
 	if err != nil || gatewayPort == 0 {
-		return nil, markTerminal(E.New("GlobalProtect gateway has an invalid GPST port"))
+		return nil, markTerminal(E.New("gateway has an invalid GPST port"))
 	}
 	dialer := c.config.Client.options.Dialer
 	destination := M.ParseSocksaddrHostPort(c.config.Snapshot.authenticatedAddress.Unmap().String(), uint16(gatewayPort))
@@ -295,7 +295,7 @@ func (c *gpstChannel) connect() (*tls.Conn, error) {
 	}
 	classifiedErr := classifyGPTunnelHTTPStatus(statusCode, "GPST")
 	if classifiedErr == nil {
-		classifiedErr = markTerminal(E.Extend(ErrProtocolNotSupported, "GlobalProtect GPST endpoint returned an HTTP response instead of START_TUNNEL"))
+		classifiedErr = markTerminal(E.Extend(ErrProtocolNotSupported, "GPST endpoint returned an HTTP response instead of START_TUNNEL"))
 	}
 	return nil, E.Append(classifiedErr, closeErr, func(cause error) error {
 		return E.Cause(cause, "close failed GPST TLS connection")
@@ -313,7 +313,7 @@ func readGPSTHTTPStatus(connection net.Conn, prefix []byte) (int, error) {
 		line = append(line, one[0])
 	}
 	if len(line) == gpstMaximumStatusLine && line[len(line)-1] != '\n' {
-		return 0, markTerminal(E.Extend(ErrProtocolNotSupported, "GlobalProtect GPST HTTP status line is too long"))
+		return 0, markTerminal(E.Extend(ErrProtocolNotSupported, "GPST HTTP status line is too long"))
 	}
 	fields := strings.Fields(string(line))
 	if len(fields) < 2 || !strings.HasPrefix(fields[0], "HTTP/") {

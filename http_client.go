@@ -24,13 +24,13 @@ func parseServerURL(server string) (*url.URL, error) {
 		return nil, E.Cause(err, "parse openconnect server")
 	}
 	if serverURL.Scheme != "https" || serverURL.Hostname() == "" {
-		return nil, E.New("openconnect server must be an HTTPS host")
+		return nil, E.New("server must be an HTTPS host")
 	}
 	if serverURL.User != nil {
-		return nil, E.New("openconnect server must not contain URL user information")
+		return nil, E.New("server must not contain URL user information")
 	}
 	if serverURL.RawQuery != "" || serverURL.Fragment != "" {
-		return nil, E.New("openconnect server must not contain a query or fragment")
+		return nil, E.New("server must not contain a query or fragment")
 	}
 	return serverURL, nil
 }
@@ -48,13 +48,14 @@ func newHTTPClient(client *Client, tlsConfig *tls.Config) (*http.Client, *http.T
 		},
 		ForceAttemptHTTP2: false,
 		TLSClientConfig:   transportTLSConfig,
+		DisableKeepAlives: client.options.HTTPKeepAliveDisabled,
 	}
 	return &http.Client{
-		Transport: transport,
+		Transport: client.wrapHTTPTransport(transport),
 		Jar:       jar,
 		CheckRedirect: func(request *http.Request, previousRequests []*http.Request) error {
 			if len(previousRequests) >= 10 {
-				return E.New("openconnect HTTP redirect limit exceeded")
+				return E.New("HTTP redirect limit exceeded")
 			}
 			return validateHTTPSRequestURL(request.URL)
 		},
@@ -63,10 +64,10 @@ func newHTTPClient(client *Client, tlsConfig *tls.Config) (*http.Client, *http.T
 
 func validateHTTPSRequestURL(requestURL *url.URL) error {
 	if requestURL == nil || requestURL.Scheme != "https" || requestURL.Hostname() == "" {
-		return E.New("openconnect request URL must be an HTTPS host")
+		return E.New("request URL must be an HTTPS host")
 	}
 	if requestURL.User != nil {
-		return E.New("openconnect request URL must not contain user information")
+		return E.New("request URL must not contain user information")
 	}
 	return nil
 }

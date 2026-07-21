@@ -131,7 +131,7 @@ func (c *pulseIFTConnection) writeFrameBuffers(vendor uint32, frameType uint32, 
 	for index, packetBuffer := range packetBuffers {
 		payloadLength := packetBuffer.Len()
 		if uint64(payloadLength)+pulseIFTHeaderSize > uint64(^uint32(0)) {
-			return E.New("Pulse IF-T payload is too large: ", payloadLength)
+			return E.New("IF-T payload is too large: ", payloadLength)
 		}
 		packetBuffers[index] = requirePacketBufferCapacity(packetBuffer, pulseIFTHeaderSize, 0)
 		header := packetBuffers[index].ExtendHeader(pulseIFTHeaderSize)
@@ -141,7 +141,7 @@ func (c *pulseIFTConnection) writeFrameBuffers(vendor uint32, frameType uint32, 
 		binary.BigEndian.PutUint32(header[12:16], c.sequence)
 		c.sequence++
 	}
-	err := writePacketBufferSequence(c.Conn, packetBuffers)
+	err := writeByteSequence(c.Conn, buf.ToSliceMulti(packetBuffers))
 	if err != nil {
 		return E.Cause(err, "write Pulse protocol bytes")
 	}
@@ -172,27 +172,27 @@ type pulseEAPPacket struct {
 
 func parsePulseEAP(content []byte) (pulseEAPPacket, error) {
 	if len(content) < 4 {
-		return pulseEAPPacket{}, E.New("Pulse EAP packet is shorter than its header")
+		return pulseEAPPacket{}, E.New("EAP packet is shorter than its header")
 	}
 	packetLength := int(binary.BigEndian.Uint16(content[2:4]))
 	if packetLength != len(content) {
-		return pulseEAPPacket{}, E.New("Pulse EAP length mismatch: ", packetLength, " != ", len(content))
+		return pulseEAPPacket{}, E.New("EAP length mismatch: ", packetLength, " != ", len(content))
 	}
 	packet := pulseEAPPacket{code: content[0], identifier: content[1]}
 	if packet.code == pulseEAPSuccess || packet.code == pulseEAPFailure {
 		if len(content) != 4 {
-			return pulseEAPPacket{}, E.New("Pulse terminal EAP packet has a payload")
+			return pulseEAPPacket{}, E.New("terminal EAP packet has a payload")
 		}
 		return packet, nil
 	}
 	if len(content) < 5 {
-		return pulseEAPPacket{}, E.New("Pulse EAP packet omitted its type")
+		return pulseEAPPacket{}, E.New("EAP packet omitted its type")
 	}
 	packet.typeValue = uint32(content[4])
 	packet.payload = content[5:]
 	if content[4] == pulseEAPTypeExpanded {
 		if len(content) < 12 {
-			return pulseEAPPacket{}, E.New("Pulse expanded EAP packet is too short")
+			return pulseEAPPacket{}, E.New("expanded EAP packet is too short")
 		}
 		packet.typeValue = binary.BigEndian.Uint32(content[4:8])
 		packet.subtype = binary.BigEndian.Uint32(content[8:12])
@@ -207,7 +207,7 @@ func buildPulseEAP(code byte, identifier byte, typeValue byte, subtype uint32, p
 		headerLength = 12
 	}
 	if len(payload) > int(^uint16(0))-headerLength {
-		return nil, E.New("Pulse EAP payload is too large: ", len(payload))
+		return nil, E.New("EAP payload is too large: ", len(payload))
 	}
 	content := make([]byte, headerLength+len(payload))
 	content[0] = code
@@ -228,7 +228,7 @@ func parsePulseAuthenticationEAP(frame pulseIFTFrame) (pulseEAPPacket, error) {
 		return pulseEAPPacket{}, E.New("unexpected Pulse IF-T authentication frame")
 	}
 	if len(frame.payload) < 4 || binary.BigEndian.Uint32(frame.payload[:4]) != pulseIFTAuthenticationJuniper {
-		return pulseEAPPacket{}, E.New("Pulse IF-T authentication frame omitted Juniper/1 auth type")
+		return pulseEAPPacket{}, E.New("IF-T authentication frame omitted Juniper/1 auth type")
 	}
 	packet, err := parsePulseEAP(frame.payload[4:])
 	if err != nil {
@@ -258,7 +258,7 @@ func parsePulseAVPs(content []byte) ([]pulseAVP, error) {
 	var attributes []pulseAVP
 	for len(content) > 0 {
 		if len(content) < 8 {
-			return nil, E.New("Pulse AVP stream ended inside a header")
+			return nil, E.New("AVP stream ended inside a header")
 		}
 		code := binary.BigEndian.Uint32(content[0:4])
 		flags := content[4]
@@ -272,7 +272,7 @@ func parsePulseAVPs(content []byte) ([]pulseAVP, error) {
 		}
 		alignedLength := (attributeLength + 3) &^ 3
 		if alignedLength > len(content) {
-			return nil, E.New("Pulse AVP padding exceeds its packet")
+			return nil, E.New("AVP padding exceeds its packet")
 		}
 		attribute := pulseAVP{code: code, flags: flags}
 		if headerLength == 12 {
@@ -294,7 +294,7 @@ func appendPulseAVP(destination []byte, code uint32, vendor uint32, data []byte)
 	}
 	attributeLength := headerLength + len(data)
 	if attributeLength > 0x00ffffff {
-		return nil, E.New("Pulse AVP is too large: ", attributeLength)
+		return nil, E.New("AVP is too large: ", attributeLength)
 	}
 	alignedLength := (attributeLength + 3) &^ 3
 	start := len(destination)

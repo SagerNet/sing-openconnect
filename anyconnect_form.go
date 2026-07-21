@@ -221,7 +221,7 @@ func parseAnyConnectAuthenticationXML(content []byte, reportedOS string) (anyCon
 		if result.ClientCertificateRequested || result.MultipleCertificatesRequested {
 			return result, nil
 		}
-		return anyConnectForm{}, markTerminal(E.New("AnyConnect authentication XML has no auth node"))
+		return anyConnectForm{}, markTerminal(E.New("authentication XML has no auth node"))
 	}
 	authentication := document.Authentication
 	result.AuthenticationID = authentication.ID
@@ -241,7 +241,7 @@ func parseAnyConnectAuthenticationXML(content []byte, reportedOS string) (anyCon
 		BrowserMode: strings.TrimSpace(authentication.SSOBrowserMode.Text),
 	}
 	if result.AuthenticationID == "" && authentication.AuthenticationComplete == nil {
-		return anyConnectForm{}, markTerminal(E.New("AnyConnect authentication XML auth node has no id"))
+		return anyConnectForm{}, markTerminal(E.New("authentication XML auth node has no id"))
 	}
 	mergeAnyConnectLegacyCSD(&result.HostScan, selectAnyConnectLegacyCSD(authentication, reportedOS))
 	if authentication.Form == nil {
@@ -253,7 +253,7 @@ func parseAnyConnectAuthenticationXML(content []byte, reportedOS string) (anyCon
 	}
 	if formNode.Action != nil {
 		if *formNode.Action == "" {
-			return anyConnectForm{}, markTerminal(E.New("AnyConnect authentication form has an empty action"))
+			return anyConnectForm{}, markTerminal(E.New("authentication form has an empty action"))
 		}
 		result.Action = *formNode.Action
 	}
@@ -287,7 +287,7 @@ func parseAnyConnectAuthenticationXML(content []byte, reportedOS string) (anyCon
 
 func parseAnyConnectSelect(node anyConnectSelectNode) (anyConnectFormField, error) {
 	if node.Name == "" {
-		return anyConnectFormField{}, E.New("AnyConnect authentication select has no name")
+		return anyConnectFormField{}, E.New("authentication select has no name")
 	}
 	field := anyConnectFormField{
 		Name:           node.Name,

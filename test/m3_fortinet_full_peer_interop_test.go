@@ -60,6 +60,7 @@ type m3FortinetFullPeerCase struct {
 	answer405         bool
 	saml              bool
 	forbiddenMarkers  []string
+	baseMTU           uint32
 }
 
 type m3FortinetFullPeerCertificateFixture struct {
@@ -116,6 +117,13 @@ func TestM3FortinetIndependentFullPeerMatrix(t *testing.T) {
 	testCases := []m3FortinetFullPeerCase{
 		{
 			name:            "tls-plain-dual-stack",
+			expectedCarrier: "TLS",
+			expectedTunnels: []string{"FORTINET_PEER_TLS_TUNNEL_1"},
+		},
+		{
+			name:            "tls-base-mtu",
+			baseMTU:         1280,
+			initialMTU:      1225,
 			expectedCarrier: "TLS",
 			expectedTunnels: []string{"FORTINET_PEER_TLS_TUNNEL_1"},
 		},
@@ -188,8 +196,8 @@ func TestM3FortinetIndependentFullPeerMatrix(t *testing.T) {
 			lateTakeover:     true,
 			tunnelAttempts:   2,
 			closedBridges:    2,
-			initialMTU:       1400,
-			reestablishedMTU: 1353,
+			initialMTU:       1351,
+			reestablishedMTU: 1351,
 			maximumPacket:    true,
 		},
 		{
@@ -272,13 +280,13 @@ func TestM3FortinetIndependentFullPeerMatrix(t *testing.T) {
 		},
 		{
 			name:              "expired-cleanup-timeout-reauthenticates",
-			environment:       map[string]string{"FAIL_FIRST_TLS": "1", "RECONNECT_TIMEOUT": "1"},
+			environment:       map[string]string{"FAIL_FIRST_TLS": "1", "DROP_SECOND_TLS": "1", "RECONNECT_TIMEOUT": "1"},
 			expectedCarrier:   "TLS",
-			expectedTunnels:   []string{"FORTINET_PEER_FORCED_TLS_FAILURE", "FORTINET_PEER_TLS_TUNNEL_2", "FORTINET_PEER_CONFIGURATION_2"},
+			expectedTunnels:   []string{"FORTINET_PEER_FORCED_TLS_FAILURE", "FORTINET_PEER_SECOND_TLS_DROPPED", "FORTINET_PEER_TLS_TUNNEL_3", "FORTINET_PEER_CONFIGURATION_2"},
 			expectedHostDials: 6,
 			tlsRecovery:       true,
 			configurationTwo:  true,
-			tunnelAttempts:    2,
+			tunnelAttempts:    3,
 			closedBridges:     2,
 		},
 		{
@@ -404,6 +412,7 @@ func runM3FortinetFullPeerCase(
 		Username: "test",
 		Password: "test",
 		Dialer:   dialer,
+		BaseMTU:  testCase.baseMTU,
 		TLSConfig: openconnect.ClientTLSOptions{
 			CertificateAuthority: openconnect.Material{Content: rootCertificate},
 		},
@@ -520,7 +529,9 @@ func runM3FortinetFullPeerCase(
 		}
 	} else {
 		exchangeM3FortinetIPv4(t, ctx, client, 1)
-		exchangeM3FortinetIPv6(t, ctx, client, 1)
+		if initialEvent.Configuration.MTU >= minimumM3IPv6MTU {
+			exchangeM3FortinetIPv6(t, ctx, client, 1)
+		}
 	}
 	if testCase.expectedCarrier == "DTLS" {
 		exchangeM3FortinetMaximumIPv4(t, ctx, client, int(expectedInitialMTU), 9)
@@ -534,9 +545,10 @@ func runM3FortinetFullPeerCase(
 		"FORTINET_PEER_SNI_" + m3FortinetFullPeerHostname,
 		"FORTINET_PEER_PPPD_ECHO_REQUEST",
 		"FORTINET_PEER_CLIENT_IPV4 ",
-		"FORTINET_PEER_CLIENT_IPV6 ",
 		"FORTINET_PEER_PPPD_IPV4 ",
-		"FORTINET_PEER_PPPD_IPV6 ",
+	}
+	if initialEvent.Configuration.MTU >= minimumM3IPv6MTU {
+		requiredMarkers = append(requiredMarkers, "FORTINET_PEER_CLIENT_IPV6 ", "FORTINET_PEER_PPPD_IPV6 ")
 	}
 	for _, marker := range requiredMarkers {
 		waitM3FortinetPeerMarker(t, ctx, peer, marker, 10*time.Second)
@@ -823,7 +835,9 @@ func assertM3FortinetConfiguration(t *testing.T, configuration openconnect.Tunne
 	t.Helper()
 	expectedAddresses := []netip.Prefix{
 		netip.MustParsePrefix("192.0.2.2/32"),
-		netip.MustParsePrefix("fe80::2/64"),
+	}
+	if expectedMTU >= minimumM3IPv6MTU {
+		expectedAddresses = append(expectedAddresses, netip.MustParsePrefix("fe80::2/64"))
 	}
 	expectedDNS := []netip.Addr{netip.MustParseAddr("203.0.113.53"), netip.MustParseAddr("203.0.113.54")}
 	if configuration.MTU != expectedMTU || !slices.Equal(configuration.Addresses, expectedAddresses) ||
@@ -835,11 +849,14 @@ func assertM3FortinetConfiguration(t *testing.T, configuration openconnect.Tunne
 		configuration.IdleTimeout != 15*time.Minute || configuration.AuthenticationExpiration.IsZero() {
 		t.Fatalf("unexpected independent Fortinet configuration: %+v", configuration)
 	}
-	for _, expectedPrefix := range []netip.Prefix{
+	expectedRoutes := []netip.Prefix{
 		netip.MustParsePrefix("192.0.2.0/24"),
 		netip.MustParsePrefix("198.51.100.0/24"),
-		netip.MustParsePrefix("2001:db8::/32"),
-	} {
+	}
+	if expectedMTU >= minimumM3IPv6MTU {
+		expectedRoutes = append(expectedRoutes, netip.MustParsePrefix("2001:db8::/32"))
+	}
+	for _, expectedPrefix := range expectedRoutes {
 		if !slices.ContainsFunc(configuration.Routes, func(route openconnect.TunnelRoute) bool {
 			return route.Prefix == expectedPrefix
 		}) {

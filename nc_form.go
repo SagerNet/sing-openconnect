@@ -47,14 +47,14 @@ func parseNCAuthenticationDocument(content []byte) (*ncAuthenticationForm, error
 		identifier = formIdentifier
 	}
 	if identifier == "" {
-		return nil, E.New("Network Connect authentication form has no name or ID")
+		return nil, E.New("authentication form has no name or ID")
 	}
 	if identifier == "frmSelectRoles" {
 		return parseNCRoleForm(formNode)
 	}
 	method, _ := htmlAttribute(formNode, "method")
 	if !strings.EqualFold(strings.TrimSpace(method), "post") {
-		return nil, E.New("Network Connect authentication form method is not POST: ", identifier)
+		return nil, E.New("authentication form method is not POST: ", identifier)
 	}
 	action, _ := htmlAttribute(formNode, "action")
 	form := &ncAuthenticationForm{
@@ -135,7 +135,7 @@ func parseNCHTMLInput(form *ncAuthenticationForm, fieldIndex int, node *html.Nod
 	name, _ := htmlAttribute(node, "name")
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return ncAuthenticationField{}, false, E.New("Network Connect authentication input has no name in form ", form.id)
+		return ncAuthenticationField{}, false, E.New("authentication input has no name in form ", form.id)
 	}
 	value, _ := htmlAttribute(node, "value")
 	return ncAuthenticationField{
@@ -151,7 +151,7 @@ func parseNCHTMLSelect(formIdentifier string, fieldIndex int, node *html.Node) (
 	name, _ := htmlAttribute(node, "name")
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return ncAuthenticationField{}, E.New("Network Connect authentication select has no name in form ", formIdentifier)
+		return ncAuthenticationField{}, E.New("authentication select has no name in form ", formIdentifier)
 	}
 	field := ncAuthenticationField{
 		submissionKey: ncSubmissionKey(formIdentifier, fieldIndex),
@@ -177,7 +177,7 @@ func parseNCHTMLSelect(formIdentifier string, fieldIndex int, node *html.Node) (
 		}
 	}
 	if len(field.options) == 0 {
-		return ncAuthenticationField{}, E.New("Network Connect authentication select has no choices: ", name)
+		return ncAuthenticationField{}, E.New("authentication select has no choices: ", name)
 	}
 	return field, nil
 }
@@ -185,7 +185,7 @@ func parseNCHTMLSelect(formIdentifier string, fieldIndex int, node *html.Node) (
 func parseNCRoleForm(formNode *html.Node) (*ncAuthenticationForm, error) {
 	tableNode := findNCHTMLTableByID(formNode, "TABLE_SelectRole_1")
 	if tableNode == nil {
-		return nil, E.New("Network Connect role form has no TABLE_SelectRole_1 table")
+		return nil, E.New("role form has no TABLE_SelectRole_1 table")
 	}
 	field := ncAuthenticationField{
 		submissionKey: ncSubmissionKey("frmSelectRoles", 0),
@@ -208,7 +208,7 @@ func parseNCRoleForm(formNode *html.Node) (*ncAuthenticationForm, error) {
 	}
 	collect(tableNode)
 	if len(field.options) == 0 {
-		return nil, E.New("Network Connect role form has no selectable roles")
+		return nil, E.New("role form has no selectable roles")
 	}
 	field.value = field.options[0].Value
 	return &ncAuthenticationForm{

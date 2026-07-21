@@ -71,7 +71,7 @@ func newNCExternalTNCCRunner(
 
 func ncPeerCertificateSHA256(certificate *x509.Certificate) (string, error) {
 	if certificate == nil || len(certificate.RawSubjectPublicKeyInfo) == 0 {
-		return "", E.New("Network Connect TNCC wrapper requires the accepted TLS peer certificate")
+		return "", E.New("TNCC wrapper requires the accepted TLS peer certificate")
 	}
 	digest := sha256.Sum256(certificate.RawSubjectPublicKeyInfo)
 	return base64.StdEncoding.EncodeToString(digest[:]), nil

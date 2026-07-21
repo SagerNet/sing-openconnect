@@ -39,6 +39,8 @@ REJECT_FIRST_TLS = os.environ.get("REJECT_FIRST_TLS", "0") == "1"
 REJECT_FIRST_DTLS = os.environ.get("REJECT_FIRST_DTLS", "0") == "1"
 MALFORMED_DTLS = os.environ.get("MALFORMED_DTLS", "0") == "1"
 DEFER_PASSWORD = os.environ.get("DEFER_PASSWORD", "0") == "1"
+NO_ROUTES = os.environ.get("NO_ROUTES", "0") == "1"
+EXPECT_IPV6 = os.environ.get("EXPECT_IPV6", "1") == "1"
 AUTH_FAILURE_STATUS = int(os.environ.get("AUTH_FAILURE_STATUS", "0"))
 ADDRESS_INDEX = int(os.environ.get("ADDRESS_INDEX", "1"))
 if ADDRESS_INDEX < 1 or ADDRESS_INDEX > 127:
@@ -562,6 +564,8 @@ def authenticated(headers):
 def options_document():
     configured_dtls = DTLS and not (REJECT_FIRST_DTLS and dtls_session_rejected)
     dtls_port = PORT if configured_dtls and not HDLC else 0
+    routes = "" if NO_ROUTES else """<LAN0>192.0.2.0/24 198.51.100.0/24</LAN0>
+<LAN6_0>2001:db8::/32</LAN6_0>"""
     return """<?xml version="1.0" encoding="UTF-8"?>
 <favorite><object>
 <ur_Z>/Common/full-peer-Z</ur_Z>
@@ -574,8 +578,7 @@ def options_document():
 <WINS0>203.0.113.137</WINS0><WINS1>203.0.113.138</WINS1>
 <DNSSuffix0>f5.test</DNSSuffix0><DNS_SPLIT0>internal.f5.test</DNS_SPLIT0>
 <SplitTunneling0>1</SplitTunneling0>
-<LAN0>192.0.2.0/24 198.51.100.0/24</LAN0>
-<LAN6_0>2001:db8::/32</LAN6_0>
+{routes}
 <ExcludeSubnets0>198.51.100.128/25</ExcludeSubnets0>
 <hdlc_framing>{hdlc}</hdlc_framing>
 </object></favorite>""".format(
@@ -583,6 +586,7 @@ def options_document():
         port=dtls_port,
         dtls12=1 if DTLS12 else 0,
         hdlc="yes" if HDLC else "no",
+        routes=routes,
     ).encode()
 
 
@@ -595,7 +599,7 @@ def validate_tunnel_request(target, headers):
         "sess": ["f5-full-session-id"],
         "hdlc_framing": ["yes" if HDLC else "no"],
         "ipv4": ["yes"],
-        "ipv6": ["yes"],
+        "ipv6": ["yes" if EXPECT_IPV6 else "no"],
         "Z": ["/Common/full-peer-Z"],
     }
     for name, value in expected.items():

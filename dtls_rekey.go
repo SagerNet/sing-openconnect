@@ -8,7 +8,7 @@ import (
 
 const anyConnectDTLSTimerResolution = 250 * time.Millisecond
 
-var errAnyConnectDTLSRekey = E.New("AnyConnect DTLS SSL rekey due")
+var errAnyConnectDTLSRekey = E.New("DTLS SSL rekey due")
 
 func (c *anyConnectDTLSChannel) timerLoop() {
 	defer c.waitGroup.Done()
