@@ -1,5 +1,0 @@
-The peer runs Debian pppd 2.5.2-1+1 from the pinned Debian trixie image.
-
-The framing shim is an independent test implementation of the observable wire
-formats in OpenConnect ppp.c at commit
-2035601b64a5360a46d18e08937e7f654b3230f2. It shares no production Go code.

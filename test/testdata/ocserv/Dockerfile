@@ -8,7 +8,6 @@ RUN apt-get update \
 
 COPY ocpasswd /etc/ocserv/ocpasswd
 COPY ocserv.conf /etc/ocserv/ocserv.conf
-COPY ocserv-legacy.conf /etc/ocserv/ocserv-legacy.conf
 COPY server-cert.pem /etc/ocserv/server-cert.pem
 COPY server-key.pem /etc/ocserv/server-key.pem
 

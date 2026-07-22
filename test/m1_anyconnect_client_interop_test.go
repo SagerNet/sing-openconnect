@@ -41,8 +41,8 @@ socket-file = /run/ocserv-socket
 use-occtl = true
 occtl-socket-file = /run/occtl.socket
 
-server-cert = /etc/ocserv/server-cert.pem
-server-key = /etc/ocserv/server-key.pem
+server-cert = %s
+server-key = %s
 tls-priorities = "NORMAL:%%SERVER_PRECEDENCE:%%COMPAT"
 
 isolate-workers = false
@@ -80,14 +80,16 @@ const (
 )
 
 type m1OcservOptions struct {
-	authentication string
-	extra          string
-	logLevel       int
-	keepalive      int
-	dpd            int
-	rekey          int
-	rekeyMethod    string
-	files          map[string][]byte
+	authentication    string
+	extra             string
+	logLevel          int
+	keepalive         int
+	dpd               int
+	rekey             int
+	rekeyMethod       string
+	files             map[string][]byte
+	serverCertificate []byte
+	serverKey         []byte
 }
 
 type m1OcservContainer struct {
@@ -115,9 +117,6 @@ type m1RecordingLogger struct {
 
 func TestM1AnyConnectClientAuthenticationInterop(t *testing.T) {
 	t.Parallel()
-	if testing.Short() || !interopEnabled() {
-		t.Skip(openConnectInteropEnvironment + " is not set")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	t.Cleanup(cancel)
 	interactiveUsername := "interactive-group-user"
@@ -209,9 +208,6 @@ func TestM1AnyConnectClientAuthenticationInterop(t *testing.T) {
 
 func TestM1AnyConnectClientCertificateInterop(t *testing.T) {
 	t.Parallel()
-	if testing.Short() || !interopEnabled() {
-		t.Skip(openConnectInteropEnvironment + " is not set")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
 	caCertificate, clientCertificate, clientKey := createM1ClientCertificate(t, "certificate-user")
@@ -240,9 +236,6 @@ func TestM1AnyConnectClientCertificateInterop(t *testing.T) {
 
 func TestM1AnyConnectOATHInterop(t *testing.T) {
 	t.Parallel()
-	if testing.Short() || !interopEnabled() {
-		t.Skip(openConnectInteropEnvironment + " is not set")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	t.Cleanup(cancel)
 	t.Run("totp-liboath", func(t *testing.T) {
@@ -313,9 +306,6 @@ func TestM1AnyConnectOATHInterop(t *testing.T) {
 
 func TestM1AnyConnectCSTPFallbackAndLivenessInterop(t *testing.T) {
 	t.Parallel()
-	if testing.Short() || !interopEnabled() {
-		t.Skip(openConnectInteropEnvironment + " is not set")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	t.Cleanup(cancel)
 	container := startM1OcservContainer(t, ctx, m1OcservOptions{
@@ -369,9 +359,6 @@ func TestM1AnyConnectCSTPFallbackAndLivenessInterop(t *testing.T) {
 
 func TestM1AnyConnectRekeyAndReconnectInterop(t *testing.T) {
 	t.Parallel()
-	if testing.Short() || !interopEnabled() {
-		t.Skip(openConnectInteropEnvironment + " is not set")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	t.Cleanup(cancel)
 
@@ -538,6 +525,20 @@ func startM1OcservContainer(t *testing.T, ctx context.Context, options m1OcservO
 	if options.logLevel == 0 {
 		options.logLevel = 4
 	}
+	serverCertificatePath := "/etc/ocserv/server-cert.pem"
+	serverKeyPath := "/etc/ocserv/server-key.pem"
+	if len(options.serverCertificate) > 0 || len(options.serverKey) > 0 {
+		if len(options.serverCertificate) == 0 || len(options.serverKey) == 0 {
+			t.Fatal("custom ocserv TLS identity requires both certificate and key")
+		}
+		if options.files == nil {
+			options.files = make(map[string][]byte)
+		}
+		options.files["server-cert.pem"] = options.serverCertificate
+		options.files["server-key.pem"] = options.serverKey
+		serverCertificatePath = "/fixture/server-cert.pem"
+		serverKeyPath = "/fixture/server-key.pem"
+	}
 	fixtureDirectory := t.TempDir()
 	err = os.Chmod(fixtureDirectory, 0o755)
 	if err != nil {
@@ -546,6 +547,8 @@ func startM1OcservContainer(t *testing.T, ctx context.Context, options m1OcservO
 	configuration := fmt.Sprintf(
 		m1OcservConfiguration,
 		options.authentication,
+		serverCertificatePath,
+		serverKeyPath,
 		options.keepalive,
 		options.dpd,
 		options.rekey,
@@ -556,10 +559,9 @@ func startM1OcservContainer(t *testing.T, ctx context.Context, options m1OcservO
 	for name, content := range options.files {
 		writeM1FixtureFile(t, fixtureDirectory, name, content)
 	}
-	containerName := "sing-openconnect-m1-client-" + strconv.FormatInt(time.Now().UnixNano(), 10)
-	_, err = dockerOutput(
+	containerOutput, err := dockerOutput(
 		ctx,
-		"run", "--detach", "--rm", "--name", containerName,
+		"run", "--detach", "--rm",
 		"--cap-add", "NET_ADMIN", "--device", "/dev/net/tun",
 		"--publish", "127.0.0.1::443/tcp", "--publish", "127.0.0.1::443/udp",
 		"--mount", "type=bind,source="+fixtureDirectory+",target=/fixture",
@@ -569,6 +571,10 @@ func startM1OcservContainer(t *testing.T, ctx context.Context, options m1OcservO
 	)
 	if err != nil {
 		t.Fatal(err)
+	}
+	containerName := strings.TrimSpace(containerOutput)
+	if containerName == "" {
+		t.Fatal("docker run returned an empty ocserv container ID")
 	}
 	t.Cleanup(func() {
 		if t.Failed() {
@@ -655,33 +661,6 @@ func waitForActiveTransportUpdate(
 		case <-updated:
 			updated = client.ActiveTransportUpdated()
 			if client.ActiveTransport() == expected {
-				return
-			}
-		}
-	}
-}
-
-func waitForActiveTransportLossAndRecovery(
-	t *testing.T,
-	ctx context.Context,
-	client *openconnect.Client,
-	updated <-chan struct{},
-	recovered string,
-) {
-	t.Helper()
-	waitContext, cancelWait := context.WithTimeout(ctx, 20*time.Second)
-	defer cancelWait()
-	sawLoss := false
-	for {
-		select {
-		case <-waitContext.Done():
-			t.Fatal(E.Cause(waitContext.Err(), "wait for active transport loss and recovery to ", recovered, "; loss observed: ", sawLoss))
-		case <-updated:
-			updated = client.ActiveTransportUpdated()
-			activeTransport := client.ActiveTransport()
-			if activeTransport == "" {
-				sawLoss = true
-			} else if sawLoss && activeTransport == recovered {
 				return
 			}
 		}

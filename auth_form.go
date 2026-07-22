@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 
 	E "github.com/sagernet/sing/common/exceptions"
@@ -54,10 +55,12 @@ type AuthFormChoice struct {
 }
 
 type BrowserRequest struct {
-	URL         string
-	FinalURL    string
-	CookieNames []string
-	HeaderNames []string
+	URL                 string
+	FinalURL            string
+	CallbackURLPrefixes []string
+	CookieNames         []string
+	EarlyCookieNames    []string
+	HeaderNames         []string
 }
 
 type BrowserCookie struct {
@@ -70,6 +73,14 @@ type BrowserResult struct {
 	Cookies  []BrowserCookie
 	Header   http.Header
 }
+
+type browserAuthenticationMode uint8
+
+const (
+	browserAuthenticationModeCallback browserAuthenticationMode = iota + 1
+	browserAuthenticationModeCookies
+	browserAuthenticationModeHeaders
+)
 
 type AuthResponse struct {
 	Form    *AuthFormResponse
@@ -178,7 +189,6 @@ func (c *Client) CancelAuthChallenge(id string) error {
 	c.pendingAuthChallenge = nil
 	c.signalAuthChallengeUpdatedLocked()
 	c.authChallengeAccess.Unlock()
-	c.setTerminalError(ErrAuthChallengeCanceled)
 	if pending.cancel != nil {
 		err := pending.cancel()
 		if err != nil {
@@ -269,6 +279,10 @@ func (c *Client) awaitAuthChallenge(ctx context.Context, request authenticationR
 		return nil
 	}
 	if request.Browser != nil {
+		browserMode, browserModeErr := validateBrowserRequest(request.Browser)
+		if browserModeErr != nil {
+			return authenticationResponse{}, markTerminal(browserModeErr)
+		}
 		responseChannel := make(chan AuthResponse, 1)
 		cancelChannel := make(chan struct{})
 		state := &pendingAuthChallengeState{
@@ -280,13 +294,7 @@ func (c *Client) awaitAuthChallenge(ctx context.Context, request authenticationR
 				Browser: cloneBrowserRequest(request.Browser),
 			},
 			validate: func(response AuthResponse) error {
-				if response.Form != nil || response.Browser == nil {
-					return ErrInvalidAuthResponse
-				}
-				if response.Browser.FinalURL == "" && len(response.Browser.Cookies) == 0 && len(response.Browser.Header) == 0 {
-					return ErrInvalidBrowserAuthentication
-				}
-				return nil
+				return validateBrowserResponse(request.Browser, browserMode, response)
 			},
 			complete: func(response AuthResponse) {
 				responseChannel <- response
@@ -389,6 +397,142 @@ func (c *Client) awaitAuthChallenge(ctx context.Context, request authenticationR
 	}
 }
 
+func validateBrowserRequest(request *BrowserRequest) (browserAuthenticationMode, error) {
+	if request.URL == "" {
+		return 0, E.New("openconnect browser request omitted its URL")
+	}
+	callbackMode := len(request.CallbackURLPrefixes) > 0
+	cookieMode := request.FinalURL != "" || len(request.CookieNames) > 0 || len(request.EarlyCookieNames) > 0
+	headerMode := len(request.HeaderNames) > 0
+	modeCount := 0
+	for _, enabled := range []bool{callbackMode, cookieMode, headerMode} {
+		if enabled {
+			modeCount++
+		}
+	}
+	if modeCount != 1 {
+		return 0, E.New("openconnect browser request must select exactly one completion mode")
+	}
+	if callbackMode {
+		if request.FinalURL != "" || len(request.CookieNames) != 0 || len(request.EarlyCookieNames) != 0 || len(request.HeaderNames) != 0 {
+			return 0, E.New("openconnect callback browser request contains fields from another completion mode")
+		}
+		if invalidStringList(request.CallbackURLPrefixes, false) {
+			return 0, E.New("openconnect callback browser request contains an empty or duplicate URL prefix")
+		}
+		return browserAuthenticationModeCallback, nil
+	}
+	if cookieMode {
+		if request.FinalURL == "" || len(request.CookieNames) == 0 || len(request.CallbackURLPrefixes) != 0 || len(request.HeaderNames) != 0 {
+			return 0, E.New("openconnect cookie browser request requires only a final URL and cookie names")
+		}
+		if invalidStringList(request.CookieNames, false) {
+			return 0, E.New("openconnect cookie browser request contains an empty or duplicate cookie name")
+		}
+		if invalidStringList(request.EarlyCookieNames, false) {
+			return 0, E.New("openconnect cookie browser request contains an empty or duplicate early cookie name")
+		}
+		for _, earlyCookieName := range request.EarlyCookieNames {
+			if slices.Contains(request.CookieNames, earlyCookieName) {
+				return 0, E.New("openconnect cookie browser request repeats an early cookie in its final cookie names")
+			}
+		}
+		return browserAuthenticationModeCookies, nil
+	}
+	if request.FinalURL != "" || len(request.CallbackURLPrefixes) != 0 || len(request.CookieNames) != 0 || len(request.EarlyCookieNames) != 0 {
+		return 0, E.New("openconnect header browser request contains fields from another completion mode")
+	}
+	if invalidStringList(request.HeaderNames, true) {
+		return 0, E.New("openconnect header browser request contains an empty or duplicate header name")
+	}
+	return browserAuthenticationModeHeaders, nil
+}
+
+func validateBrowserResponse(
+	request *BrowserRequest,
+	mode browserAuthenticationMode,
+	response AuthResponse,
+) error {
+	if response.Form != nil || response.Browser == nil {
+		return ErrInvalidAuthResponse
+	}
+	result := response.Browser
+	switch mode {
+	case browserAuthenticationModeCallback:
+		if result.FinalURL == "" || len(result.Cookies) != 0 || len(result.Header) != 0 {
+			return ErrInvalidBrowserAuthentication
+		}
+		for _, prefix := range request.CallbackURLPrefixes {
+			if strings.HasPrefix(result.FinalURL, prefix) {
+				return nil
+			}
+		}
+		return E.Errors(ErrInvalidBrowserAuthentication, E.New("browser callback URL did not match an accepted prefix"))
+	case browserAuthenticationModeCookies:
+		if result.FinalURL == "" && len(result.Header) == 0 && len(result.Cookies) == 1 {
+			earlyCookie := result.Cookies[0]
+			if earlyCookie.Value != "" && slices.Contains(request.EarlyCookieNames, earlyCookie.Name) {
+				return nil
+			}
+		}
+		if result.FinalURL != request.FinalURL || len(result.Cookies) == 0 || len(result.Header) != 0 {
+			return ErrInvalidBrowserAuthentication
+		}
+		seenCookieNames := make(map[string]struct{}, len(result.Cookies))
+		for _, cookie := range result.Cookies {
+			if cookie.Name == "" || cookie.Value == "" || !slices.Contains(request.CookieNames, cookie.Name) {
+				return E.Errors(ErrInvalidBrowserAuthentication, E.New("browser result contains an unrequested cookie"))
+			}
+			if _, exists := seenCookieNames[cookie.Name]; exists {
+				return E.Errors(ErrInvalidBrowserAuthentication, E.New("browser result contains a duplicate cookie"))
+			}
+			seenCookieNames[cookie.Name] = struct{}{}
+		}
+		return nil
+	case browserAuthenticationModeHeaders:
+		if result.FinalURL != "" || len(result.Cookies) != 0 || len(result.Header) == 0 {
+			return ErrInvalidBrowserAuthentication
+		}
+		seenHeaderNames := make(map[string]struct{}, len(result.Header))
+		for headerName := range result.Header {
+			if !containsFold(request.HeaderNames, headerName) {
+				return E.Errors(ErrInvalidBrowserAuthentication, E.New("browser result contains an unrequested header"))
+			}
+			normalizedHeaderName := strings.ToLower(headerName)
+			if _, exists := seenHeaderNames[normalizedHeaderName]; exists {
+				return E.Errors(ErrInvalidBrowserAuthentication, E.New("browser result contains a duplicate header"))
+			}
+			seenHeaderNames[normalizedHeaderName] = struct{}{}
+		}
+		return nil
+	default:
+		return ErrInvalidBrowserAuthentication
+	}
+}
+
+func invalidStringList(values []string, fold bool) bool {
+	for valueIndex, value := range values {
+		if value == "" {
+			return true
+		}
+		for previousIndex := range valueIndex {
+			if values[previousIndex] == value || (fold && strings.EqualFold(values[previousIndex], value)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containsFold(values []string, target string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, target) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Client) prefillAuthField(formID string, field authenticationRequestField) (string, bool) {
 	entry, loaded := c.formEntry(formID, field.SubmissionKey, field.Name)
 	if loaded && !entry.Promote {
@@ -475,7 +619,9 @@ func cloneBrowserRequest(request *BrowserRequest) *BrowserRequest {
 		return nil
 	}
 	cloned := *request
+	cloned.CallbackURLPrefixes = append([]string(nil), request.CallbackURLPrefixes...)
 	cloned.CookieNames = append([]string(nil), request.CookieNames...)
+	cloned.EarlyCookieNames = append([]string(nil), request.EarlyCookieNames...)
 	cloned.HeaderNames = append([]string(nil), request.HeaderNames...)
 	return &cloned
 }

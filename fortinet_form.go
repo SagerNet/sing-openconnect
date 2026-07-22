@@ -2,6 +2,7 @@ package openconnect
 
 import (
 	"bytes"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -54,6 +55,26 @@ func staticFortinetAuthenticationForm() *fortinetAuthenticationForm {
 			},
 		},
 	}
+}
+
+func parseFortinetAuthenticationResult(content []byte) (int, bool, error) {
+	trimmed := strings.TrimSpace(string(content))
+	if !strings.HasPrefix(trimmed, "ret=") {
+		return 0, false, nil
+	}
+	resultText := strings.TrimPrefix(trimmed, "ret=")
+	if separatorIndex := strings.IndexAny(resultText, ",&\r\n"); separatorIndex >= 0 {
+		resultText = resultText[:separatorIndex]
+	}
+	resultText = strings.TrimSpace(resultText)
+	if resultText == "" || len(resultText) > fortinetMaximumTokenInfoField {
+		return 0, false, E.New("Fortinet authentication result is invalid")
+	}
+	result, parseErr := strconv.ParseUint(resultText, 10, 31)
+	if parseErr != nil {
+		return 0, false, E.Cause(parseErr, "parse Fortinet authentication result")
+	}
+	return int(result), true, nil
 }
 
 func parseFortinetTokenInfo(content []byte, username string) (*fortinetAuthenticationForm, error) {
@@ -229,15 +250,44 @@ func parseFortinetHostCheckAction(content []byte) (string, bool, error) {
 	if parseErr != nil {
 		return "", false, E.Cause(parseErr, "parse Fortinet hostcheck response")
 	}
-	formNode := findFortinetHTMLNode(document, "form")
-	if formNode == nil {
-		return "", false, nil
+	var action string
+	var walk func(*html.Node) error
+	walk = func(node *html.Node) error {
+		if node.Type == html.ElementNode && strings.EqualFold(node.Data, "form") {
+			candidate := strings.TrimSpace(fortinetHTMLAttribute(node, "action"))
+			if candidate != "" {
+				candidateURL, candidateErr := url.Parse(candidate)
+				if candidateErr != nil {
+					if strings.Contains(strings.ToLower(candidate), "hostcheck") {
+						return E.Cause(candidateErr, "parse Fortinet hostcheck form action")
+					}
+					candidateURL = nil
+				}
+				if candidateURL != nil && candidateURL.Path == "/remote/hostcheck_validate" {
+					method := strings.ToUpper(strings.TrimSpace(fortinetHTMLAttribute(node, "method")))
+					if method != "" && method != http.MethodPost {
+						return E.New("Fortinet hostcheck validation form is not POST")
+					}
+					if action != "" {
+						return E.New("Fortinet hostcheck response has multiple forms")
+					}
+					action = candidate
+				}
+			}
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walkErr := walk(child)
+			if walkErr != nil {
+				return walkErr
+			}
+		}
+		return nil
 	}
-	action := strings.TrimSpace(fortinetHTMLAttribute(formNode, "action"))
-	if action == "" {
-		return "", false, nil
+	walkErr := walk(document)
+	if walkErr != nil {
+		return "", false, walkErr
 	}
-	return action, true, nil
+	return action, action != "", nil
 }
 
 func encodeFortinetAuthenticationResponse(

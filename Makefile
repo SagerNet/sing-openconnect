@@ -1,4 +1,4 @@
-.PHONY: fmt lint lint_install test interop
+.PHONY: fmt lint lint_install test
 
 export GOTOOLCHAIN := local
 unexport GOROOT
@@ -18,7 +18,4 @@ lint_install:
 
 test:
 	go test ./...
-	go -C test test -v -count=1 -timeout 15m ./...
-
-interop:
-	OPENCONNECT_IT=1 go -C test test -race -v -count=1 -timeout 50m $(INTEROP_TEST_FLAGS) ./...
+	go -C test test -race -v -count=1 -timeout 50m ./...

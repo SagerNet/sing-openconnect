@@ -103,9 +103,7 @@ func (f *fortinetFrontend) fetchTunnelConfiguration(
 		return nil, "", clientErr
 	}
 	defer transport.CloseIdleConnections()
-	configurationURL := cloneFortinetURL(snapshot.serverURL)
-	configurationURL.Path = "/remote/fortisslvpn_xml"
-	configurationURL.RawPath = ""
+	configurationURL := newFortinetEndpointURL(snapshot.serverURL, "/remote/fortisslvpn_xml")
 	if !f.client.options.IPv6Disabled {
 		configurationURL.RawQuery = "dual_stack=1"
 	}
@@ -171,10 +169,7 @@ func (f *fortinetFrontend) fetchTunnelConfiguration(
 		configuration.configuration,
 		ipv6Disabled,
 	)
-	tunnelURL := cloneFortinetURL(snapshot.serverURL)
-	tunnelURL.Path = "/remote/sslvpn-tunnel"
-	tunnelURL.RawPath = ""
-	tunnelURL.RawQuery = ""
+	tunnelURL := newFortinetEndpointURL(snapshot.serverURL, "/remote/sslvpn-tunnel")
 	cookie, loaded := fortinetCookieValue(snapshot.jar, tunnelURL)
 	if !loaded {
 		return nil, "", ErrSessionRejected
@@ -226,10 +221,7 @@ func (f *fortinetFrontend) probeLegacyConfiguration(
 	httpClient *http.Client,
 	serverURL *url.URL,
 ) error {
-	legacyURL := cloneFortinetURL(serverURL)
-	legacyURL.Path = "/remote/fortisslvpn"
-	legacyURL.RawPath = ""
-	legacyURL.RawQuery = ""
+	legacyURL := newFortinetEndpointURL(serverURL, "/remote/fortisslvpn")
 	response, responseBody, requestErr := f.doConfigurationRequest(ctx, httpClient, legacyURL)
 	if requestErr != nil {
 		return E.Errors(ErrSessionRejected, requestErr)

@@ -1,7 +1,0 @@
-Independent Pulse public-client wire peer for sing-openconnect M4.
-
-The IF-T/TLS, EAP, and EAP-TTLS wire behavior is independently implemented
-from pulse.c in OpenConnect commit
-2035601b64a5360a46d18e08937e7f654b3230f2. It reuses no production parser or
-cryptographic implementation; the peer side of TLS uses the system Python
-OpenSSL-backed ssl module.

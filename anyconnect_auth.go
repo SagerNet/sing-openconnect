@@ -655,6 +655,9 @@ func (a *anyConnectAuthentication) generateSoftwareToken(ctx context.Context, me
 }
 
 func (a *anyConnectAuthentication) buildSSOBrowserRequest() (*authenticationRequest, error) {
+	if strings.EqualFold(a.currentForm.SSO.BrowserMode, "external") {
+		return nil, markTerminal(E.Extend(ErrProtocolNotSupported, "gateway requested AnyConnect external-browser SSO"))
+	}
 	if a.currentForm.SSO.LoginURL == "" {
 		return nil, markTerminal(E.New("SSO form omitted sso-v2-login URL"))
 	}
@@ -688,7 +691,7 @@ func (a *anyConnectAuthentication) buildSSOBrowserRequest() (*authenticationRequ
 		},
 	}
 	if a.currentForm.SSO.ErrorCookie != "" {
-		request.Browser.CookieNames = append(request.Browser.CookieNames, a.currentForm.SSO.ErrorCookie)
+		request.Browser.EarlyCookieNames = []string{a.currentForm.SSO.ErrorCookie}
 	}
 	for i := range a.currentForm.Fields {
 		field := &a.currentForm.Fields[i]
@@ -737,10 +740,15 @@ func (a *anyConnectAuthentication) applyAuthenticationFieldValues(response *auth
 	return nil
 }
 
-// Upstream cstp_sso_detect_done captures the named non-empty token cookie when present, reports the error cookie, and does not finish until the browser reaches sso-v2-login-final.
+// Upstream cstp_sso_detect_done captures the named non-empty token cookie when present, reports the error cookie immediately, and does not finish successfully until the browser reaches sso-v2-login-final.
 func (a *anyConnectAuthentication) applySSOResponse(result *BrowserResult) error {
 	if result == nil {
 		return ErrInvalidBrowserAuthentication
+	}
+	for _, cookie := range result.Cookies {
+		if cookie.Name == a.currentForm.SSO.ErrorCookie && cookie.Value != "" {
+			return newRetryableAuthenticationError(E.New("SSO failed: ", cookie.Value))
+		}
 	}
 	if a.currentForm.SSO.FinalURL != "" && result.FinalURL != a.currentForm.SSO.FinalURL {
 		return E.Errors(ErrInvalidBrowserAuthentication, E.New("SSO browser did not reach the required final URL: ", a.currentForm.SSO.FinalURL))
@@ -751,9 +759,9 @@ func (a *anyConnectAuthentication) applySSOResponse(result *BrowserResult) error
 			tokenValue = cookie.Value
 			break
 		}
-		if cookie.Name == a.currentForm.SSO.ErrorCookie && cookie.Value != "" {
-			return newRetryableAuthenticationError(E.New("SSO failed: ", cookie.Value))
-		}
+	}
+	if tokenValue == "" {
+		return E.Errors(ErrInvalidBrowserAuthentication, E.New("SSO browser result omitted the token cookie"))
 	}
 	for i := range a.currentForm.Fields {
 		if a.currentForm.Fields[i].Kind == anyConnectFormFieldSSOToken {

@@ -1,9 +1,0 @@
-Independent Fortinet wire peer for sing-openconnect M3.
-
-The authentication, XML configuration, response-less TLS switch, clthello and
-svrhello application exchange, Fortinet framing, and pppd shim are independently
-implemented from the observable wire contracts in OpenConnect commit
-2035601b64a5360a46d18e08937e7f654b3230f2. The data plane is terminated by
-Debian pppd 2.5.2-1+1. TLS uses Python's OpenSSL-backed ssl module; DTLS 1.2
-uses the separately packaged OpenSSL s_server rather than the production Go
-DTLS implementation.

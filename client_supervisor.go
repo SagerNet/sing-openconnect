@@ -48,7 +48,6 @@ func classifyClientSessionError(err error) clientSessionErrorClass {
 		err,
 		ErrMissingServer,
 		ErrUnsupportedFlavor,
-		ErrAuthChallengeCanceled,
 		ErrAuthenticationFailed,
 		ErrInvalidBrowserAuthentication,
 		ErrMaterialSourceConflict,

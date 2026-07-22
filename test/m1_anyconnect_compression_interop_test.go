@@ -20,15 +20,13 @@ type m1CompressionDialer struct {
 
 func TestM1AnyConnectCompressionInterop(t *testing.T) {
 	t.Parallel()
-	if testing.Short() || !interopEnabled() {
-		t.Skip(openConnectInteropEnvironment + " is not set")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	t.Cleanup(cancel)
 	payload := strings.Repeat("sing-openconnect-compression-", 24)
 	packetSize := 28 + len(payload)
 	for _, algorithm := range []string{"oc-lz4", "lzs"} {
 		t.Run(algorithm, func(t *testing.T) {
+			t.Parallel()
 			container := startM1OcservContainer(t, ctx, m1OcservOptions{
 				authentication: `auth = "plain[passwd=/fixture/ocpasswd]"`,
 				extra: "compression = true\n" +
@@ -41,6 +39,7 @@ func TestM1AnyConnectCompressionInterop(t *testing.T) {
 				files:       map[string][]byte{"ocpasswd": []byte(m1OcservPasswordFile)},
 			})
 
+			//nolint:paralleltest // These consumers intentionally take turns using the same real ocserv account.
 			t.Run("cstp", func(t *testing.T) {
 				client := newM1AnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
 					Username: ocservUsername,
@@ -59,6 +58,7 @@ func TestM1AnyConnectCompressionInterop(t *testing.T) {
 				closeM1CompressionClient(t, ctx, container, client)
 			})
 
+			//nolint:paralleltest // These consumers intentionally take turns using the same real ocserv account.
 			t.Run("dtls", func(t *testing.T) {
 				dialer := &m1CompressionDialer{udpDestination: M.ParseSocksaddr(container.udpAddress)}
 				client := newM1AnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
@@ -85,6 +85,7 @@ func TestM1AnyConnectCompressionInterop(t *testing.T) {
 	}
 
 	t.Run("disabled", func(t *testing.T) {
+		t.Parallel()
 		container := startM1OcservContainer(t, ctx, m1OcservOptions{
 			authentication: `auth = "plain[passwd=/fixture/ocpasswd]"`,
 			extra:          "compression = true\ncompression-algo-priority = oc-lz4:1000\nno-compress-limit = 64",
@@ -189,18 +190,18 @@ func countM1CompressionActivity(logs string, packetSize int) (int, int) {
 	compressed := 0
 	packetSizeText := strconv.Itoa(packetSize)
 	compressedPrefix := "compressed " + packetSizeText + " to "
-	for _, line := range strings.Split(logs, "\n") {
+	for line := range strings.SplitSeq(logs, "\n") {
 		if strings.Contains(line, "decompressed ") && strings.Contains(line, " to "+packetSizeText) {
 			decompressed++
 		}
 		if strings.Contains(line, "decompressed ") {
 			continue
 		}
-		compressedIndex := strings.Index(line, compressedPrefix)
-		if compressedIndex < 0 {
+		_, compressedFieldsText, found := strings.Cut(line, compressedPrefix)
+		if !found {
 			continue
 		}
-		compressedFields := strings.Fields(line[compressedIndex+len(compressedPrefix):])
+		compressedFields := strings.Fields(compressedFieldsText)
 		if len(compressedFields) == 0 {
 			continue
 		}

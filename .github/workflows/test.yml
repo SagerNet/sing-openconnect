@@ -33,23 +33,6 @@ jobs:
           go-version: ${{ matrix.go-version }}
           cache: true
 
-      - name: Run unit tests
-        run: make test
-
-  interop:
-    name: interop
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: '~1.26'
-          cache: true
-
       - name: Ensure TUN device
         run: |
           sudo mkdir -p /dev/net
@@ -58,10 +41,5 @@ jobs:
           fi
           sudo chmod 0666 /dev/net/tun
 
-      - name: Install interop dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends liblzo2-dev
-
-      - name: Run OpenConnect interop tests
-        run: make interop
+      - name: Run tests
+        run: make test
