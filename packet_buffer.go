@@ -8,7 +8,10 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
-const PacketHeadroom = espFixedHeaderSize
+const (
+	PacketHeadroom     = espFixedHeaderSize
+	PacketRearHeadroom = espMaximumTrailerSize
+)
 
 func newPacketBuffer(payloadSize int) *buf.Buffer {
 	packetBuffer := buf.NewSize(PacketHeadroom + payloadSize)
