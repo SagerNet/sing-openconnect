@@ -18,10 +18,11 @@ import (
 )
 
 const (
-	espFixedHeaderSize = 8 + aes.BlockSize
-	espIPv4NextHeader  = 4
-	espLZONextHeader   = 5
-	espIPv6NextHeader  = 41
+	espFixedHeaderSize    = 8 + aes.BlockSize
+	espMaximumTrailerSize = aes.BlockSize - 1 + 2 + sha256.Size/2
+	espIPv4NextHeader     = 4
+	espLZONextHeader      = 5
+	espIPv6NextHeader     = 41
 )
 
 var (
