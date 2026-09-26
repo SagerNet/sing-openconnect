@@ -30,7 +30,7 @@ import (
 	N "github.com/sagernet/sing/common/network"
 )
 
-const m1OcservConfiguration = `%s
+const ocservConfiguration = `%s
 
 tcp-port = 443
 udp-port = 443
@@ -74,12 +74,12 @@ rekey-method = %s
 `
 
 const (
-	m1OcservPasswordFile         = "test:tost,group1,group2:$5$i6SNmLDCgBNjyJ7q$SZ4bVJb7I/DLgXo3txHBVohRFBjOtdbxGQZp.DOnrA.\n"
-	m1OcservRejectedPasswordFile = "test:tost,group1,group2:!\n"
-	m1TOTPSecret                 = "12345678901234567890"
+	ocservPasswordFile         = "test:tost,group1,group2:$5$i6SNmLDCgBNjyJ7q$SZ4bVJb7I/DLgXo3txHBVohRFBjOtdbxGQZp.DOnrA.\n"
+	ocservRejectedPasswordFile = "test:tost,group1,group2:!\n"
+	tOTPSecret                 = "12345678901234567890"
 )
 
-type m1OcservOptions struct {
+type ocservOptions struct {
 	authentication    string
 	extra             string
 	logLevel          int
@@ -92,38 +92,38 @@ type m1OcservOptions struct {
 	serverKey         []byte
 }
 
-type m1OcservContainer struct {
+type fixtureOcservContainer struct {
 	ocservContainer
 	name             string
 	fixtureDirectory string
 }
 
-type m1FailingUDPDialer struct {
+type failingUDPDialer struct {
 	attempts atomic.Uint64
 }
 
-type m1ConnectionDroppingDialer struct {
+type connectionDroppingDialer struct {
 	access         sync.Mutex
 	connections    []net.Conn
 	replacement    M.Socksaddr
 	useReplacement bool
 }
 
-type m1RecordingLogger struct {
+type recordingLogger struct {
 	t        *testing.T
 	warnings chan string
 	access   sync.Mutex
 }
 
-func TestM1AnyConnectClientAuthenticationInterop(t *testing.T) {
+func TestAnyConnectClientAuthenticationInterop(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	t.Cleanup(cancel)
 	interactiveUsername := "interactive-group-user"
 	prefilledUsername := "prefilled-group-user"
-	passwordFile := strings.Replace(m1OcservPasswordFile, ocservUsername+":", interactiveUsername+":", 1) +
-		strings.Replace(m1OcservPasswordFile, ocservUsername+":", prefilledUsername+":", 1)
-	container := startM1OcservContainer(t, ctx, m1OcservOptions{
+	passwordFile := strings.Replace(ocservPasswordFile, ocservUsername+":", interactiveUsername+":", 1) +
+		strings.Replace(ocservPasswordFile, ocservUsername+":", prefilledUsername+":", 1)
+	container := startOcservContainer(t, ctx, ocservOptions{
 		authentication: `auth = "plain[passwd=/fixture/ocpasswd]"`,
 		extra:          "select-group = group1[Primary Group]\nselect-group = group2[Secondary Group]",
 		keepalive:      60,
@@ -134,13 +134,13 @@ func TestM1AnyConnectClientAuthenticationInterop(t *testing.T) {
 
 	//nolint:paralleltest // The second session must start only after ocserv has removed this first session.
 	t.Run("interactive-multiple-rounds-and-authgroup", func(t *testing.T) {
-		client := newM1AnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{NoUDP: true})
-		startM1Client(t, client)
+		client := newAnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{NoUDP: true})
+		startClient(t, client)
 		seenForms := make(map[string]struct{})
 		selectedGroup := false
 		credentialRound := false
 		for !client.Ready() {
-			form := waitForM1AuthFormOrReady(t, ctx, client)
+			form := waitForAuthFormOrReady(t, ctx, client)
 			if form == nil {
 				break
 			}
@@ -171,47 +171,47 @@ func TestM1AnyConnectClientAuthenticationInterop(t *testing.T) {
 			if err != nil {
 				t.Fatal(E.Cause(err, "complete ocserv authentication form"))
 			}
-			waitForM1ClientStateChange(t, ctx, client)
+			waitForClientStateChange(t, ctx, client)
 		}
 		if !selectedGroup || !credentialRound || len(seenForms) < 2 {
 			t.Fatalf("ocserv did not exercise authgroup and credential rounds: group=%v credentials=%v forms=%d", selectedGroup, credentialRound, len(seenForms))
 		}
-		assertM1OcservUserGroup(t, ctx, container, interactiveUsername, "group2")
+		assertOcservUserGroup(t, ctx, container, interactiveUsername, "group2")
 		closeErr := client.Close()
 		if closeErr != nil && !E.IsClosed(closeErr) {
 			t.Fatal(E.Cause(closeErr, "close interactive authgroup client"))
 		}
-		waitForM1OcservUserAbsent(t, ctx, container, interactiveUsername)
+		waitForOcservUserAbsent(t, ctx, container, interactiveUsername)
 	})
 
 	//nolint:paralleltest // This session verifies the first same-server session has already exited.
 	t.Run("prefilled-credentials-and-authgroup", func(t *testing.T) {
-		client := newM1AnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
+		client := newAnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
 			Username:  prefilledUsername,
 			Password:  ocservPassword,
 			AuthGroup: "group1",
 			NoUDP:     true,
 		})
-		startM1Client(t, client)
-		waitForM1Ready(t, ctx, client)
+		startClient(t, client)
+		waitForReady(t, ctx, client)
 		if form := client.PendingAuthChallenge(); form != nil {
 			t.Fatalf("prefilled authentication unexpectedly prompted: %#v", form)
 		}
-		assertM1OcservUserGroup(t, ctx, container, prefilledUsername, "group1")
+		assertOcservUserGroup(t, ctx, container, prefilledUsername, "group1")
 		closeErr := client.Close()
 		if closeErr != nil && !E.IsClosed(closeErr) {
 			t.Fatal(E.Cause(closeErr, "close prefilled authgroup client"))
 		}
-		waitForM1OcservUserAbsent(t, ctx, container, prefilledUsername)
+		waitForOcservUserAbsent(t, ctx, container, prefilledUsername)
 	})
 }
 
-func TestM1AnyConnectClientCertificateInterop(t *testing.T) {
+func TestAnyConnectClientCertificateInterop(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
-	caCertificate, clientCertificate, clientKey := createM1ClientCertificate(t, "certificate-user")
-	container := startM1OcservContainer(t, ctx, m1OcservOptions{
+	caCertificate, clientCertificate, clientKey := createClientCertificate(t, "certificate-user")
+	container := startOcservContainer(t, ctx, ocservOptions{
 		authentication: "auth = \"certificate\"",
 		extra:          "ca-cert = /fixture/client-ca.pem\ncert-user-oid = 2.5.4.3",
 		keepalive:      60,
@@ -219,69 +219,69 @@ func TestM1AnyConnectClientCertificateInterop(t *testing.T) {
 		rekeyMethod:    "new-tunnel",
 		files:          map[string][]byte{"client-ca.pem": caCertificate},
 	})
-	client := newM1AnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
+	client := newAnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
 		NoUDP: true,
 		TLSConfig: openconnect.ClientTLSOptions{
 			Certificate: openconnect.Material{Content: clientCertificate},
 			Key:         openconnect.Material{Content: clientKey},
 		},
 	})
-	startM1Client(t, client)
-	waitForM1Ready(t, ctx, client)
+	startClient(t, client)
+	waitForReady(t, ctx, client)
 	if form := client.PendingAuthChallenge(); form != nil {
 		t.Fatalf("certificate-only authentication unexpectedly prompted: %#v", form)
 	}
-	assertM1OcservUsername(t, ctx, container, "certificate-user")
+	assertOcservUsername(t, ctx, container, "certificate-user")
 }
 
-func TestM1AnyConnectOATHInterop(t *testing.T) {
+func TestAnyConnectOATHInterop(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	t.Cleanup(cancel)
 	t.Run("totp-liboath", func(t *testing.T) {
 		t.Parallel()
-		secretHex := strings.ToUpper(hex.EncodeToString([]byte(m1TOTPSecret)))
-		container := startM1OcservContainer(t, ctx, m1OcservOptions{
+		secretHex := strings.ToUpper(hex.EncodeToString([]byte(tOTPSecret)))
+		container := startOcservContainer(t, ctx, ocservOptions{
 			authentication: `auth = "plain[passwd=/fixture/ocpasswd,otp=/fixture/users.oath]"`,
 			keepalive:      60,
 			dpd:            30,
 			rekeyMethod:    "new-tunnel",
 			files: map[string][]byte{
-				"ocpasswd":   []byte(m1OcservPasswordFile),
+				"ocpasswd":   []byte(ocservPasswordFile),
 				"users.oath": []byte("HOTP/T30\ttest\t-\t" + secretHex + "\n"),
 			},
 		})
-		client := newM1AnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
+		client := newAnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
 			Username: ocservUsername,
 			Password: ocservPassword,
 			NoUDP:    true,
 			Token: &openconnect.TokenOptions{
 				Mode:   openconnect.TokenModeTOTP,
-				Secret: base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString([]byte(m1TOTPSecret)),
+				Secret: base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString([]byte(tOTPSecret)),
 			},
 		})
-		startM1Client(t, client)
-		waitForM1Ready(t, ctx, client)
+		startClient(t, client)
+		waitForReady(t, ctx, client)
 		if form := client.PendingAuthChallenge(); form != nil {
 			t.Fatalf("automatic TOTP unexpectedly prompted: %#v", form)
 		}
-		assertM1OATHConsumerUpdated(t, container, "HOTP/T30")
+		assertOATHConsumerUpdated(t, container, "HOTP/T30")
 	})
 
 	t.Run("hotp-liboath", func(t *testing.T) {
 		t.Parallel()
-		container := startM1OcservContainer(t, ctx, m1OcservOptions{
+		container := startOcservContainer(t, ctx, ocservOptions{
 			authentication: `auth = "plain[passwd=/fixture/ocpasswd,otp=/fixture/users.oath]"`,
 			keepalive:      60,
 			dpd:            30,
 			rekeyMethod:    "new-tunnel",
 			files: map[string][]byte{
-				"ocpasswd":   []byte(m1OcservPasswordFile),
+				"ocpasswd":   []byte(ocservPasswordFile),
 				"users.oath": []byte("HOTP\ttest\t-\t00\n"),
 			},
 		})
 		var persistedCounter atomic.Uint64
-		client := newM1AnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
+		client := newAnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
 			Username: ocservUsername,
 			Password: ocservPassword,
 			NoUDP:    true,
@@ -295,38 +295,38 @@ func TestM1AnyConnectOATHInterop(t *testing.T) {
 				},
 			},
 		})
-		startM1Client(t, client)
-		waitForM1Ready(t, ctx, client)
+		startClient(t, client)
+		waitForReady(t, ctx, client)
 		if persistedCounter.Load() != 1 {
 			t.Fatalf("HOTP counter callback received %d, expected 1", persistedCounter.Load())
 		}
-		assertM1OATHConsumerUpdated(t, container, "HOTP")
+		assertOATHConsumerUpdated(t, container, "HOTP")
 	})
 }
 
-func TestM1AnyConnectCSTPFallbackAndLivenessInterop(t *testing.T) {
+func TestAnyConnectCSTPFallbackAndLivenessInterop(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	t.Cleanup(cancel)
-	container := startM1OcservContainer(t, ctx, m1OcservOptions{
+	container := startOcservContainer(t, ctx, ocservOptions{
 		authentication: `auth = "plain[passwd=/fixture/ocpasswd]"`,
 		keepalive:      1,
 		dpd:            2,
 		rekeyMethod:    "new-tunnel",
-		files:          map[string][]byte{"ocpasswd": []byte(m1OcservPasswordFile)},
+		files:          map[string][]byte{"ocpasswd": []byte(ocservPasswordFile)},
 	})
 
 	t.Run("no-udp-cstp-data-and-idle-liveness", func(t *testing.T) {
 		t.Parallel()
-		dialer := new(m1FailingUDPDialer)
-		client := newM1AnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
+		dialer := new(failingUDPDialer)
+		client := newAnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
 			Username: ocservUsername,
 			Password: ocservPassword,
 			NoUDP:    true,
 			Dialer:   dialer,
 		})
-		startM1Client(t, client)
-		waitForM1Ready(t, ctx, client)
+		startClient(t, client)
+		waitForReady(t, ctx, client)
 		time.Sleep(4 * time.Second)
 		if !client.Ready() {
 			t.Fatal("CSTP session did not survive negotiated keepalive and DPD intervals")
@@ -334,30 +334,30 @@ func TestM1AnyConnectCSTPFallbackAndLivenessInterop(t *testing.T) {
 		if dialer.attempts.Load() != 0 {
 			t.Fatalf("NoUDP client attempted UDP %d times", dialer.attempts.Load())
 		}
-		exchangeM1TunnelEcho(t, ctx, client, 0x4d32, 1, "sing-openconnect-m1-cstp")
+		exchangeTunnelEcho(t, ctx, client, 0x4d32, 1, "sing-openconnect-cstp")
 	})
 
 	t.Run("udp-dial-failure-falls-back-to-cstp", func(t *testing.T) {
 		t.Parallel()
-		dialer := new(m1FailingUDPDialer)
-		logger := &m1RecordingLogger{t: t, warnings: make(chan string, 16)}
-		client := newM1AnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
+		dialer := new(failingUDPDialer)
+		logger := &recordingLogger{t: t, warnings: make(chan string, 16)}
+		client := newAnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
 			Username: ocservUsername,
 			Password: ocservPassword,
 			Dialer:   dialer,
 			Logger:   logger,
 		})
-		startM1Client(t, client)
-		waitForM1Ready(t, ctx, client)
+		startClient(t, client)
+		waitForReady(t, ctx, client)
 		if dialer.attempts.Load() == 0 {
 			t.Fatal("UDP fallback test did not attempt DTLS")
 		}
-		waitForM1Warning(t, ctx, logger, "DTLS unavailable; retrying while CSTP remains active")
-		exchangeM1TunnelEcho(t, ctx, client, 0x4d32, 2, "sing-openconnect-m1-dtls-fallback")
+		waitForWarning(t, ctx, logger, "DTLS unavailable; retrying while CSTP remains active")
+		exchangeTunnelEcho(t, ctx, client, 0x4d32, 2, "sing-openconnect-dtls-fallback")
 	})
 }
 
-func TestM1AnyConnectRekeyAndReconnectInterop(t *testing.T) {
+func TestAnyConnectRekeyAndReconnectInterop(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	t.Cleanup(cancel)
@@ -365,16 +365,16 @@ func TestM1AnyConnectRekeyAndReconnectInterop(t *testing.T) {
 	for _, method := range []string{"new-tunnel", "ssl"} {
 		t.Run("rekey-"+method, func(t *testing.T) {
 			t.Parallel()
-			container := startM1OcservContainer(t, ctx, m1OcservOptions{
+			container := startOcservContainer(t, ctx, ocservOptions{
 				authentication: `auth = "plain[passwd=/fixture/ocpasswd]"`,
 				keepalive:      60,
 				dpd:            30,
 				rekey:          2,
 				rekeyMethod:    method,
-				files:          map[string][]byte{"ocpasswd": []byte(m1OcservPasswordFile)},
+				files:          map[string][]byte{"ocpasswd": []byte(ocservPasswordFile)},
 			})
 			events := make(chan openconnect.TunnelConfigurationEvent, 16)
-			client := newM1AnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
+			client := newAnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
 				Username: ocservUsername,
 				Password: ocservPassword,
 				NoUDP:    true,
@@ -383,41 +383,41 @@ func TestM1AnyConnectRekeyAndReconnectInterop(t *testing.T) {
 					return nil
 				},
 			})
-			startM1Client(t, client)
-			initial := waitForM1ConfigurationEvent(t, ctx, events)
+			startClient(t, client)
+			initial := waitForConfigurationEvent(t, ctx, events)
 			if initial.Reason != openconnect.TunnelConfigurationEventInitial {
 				t.Fatalf("unexpected initial configuration reason: %s", initial.Reason)
 			}
-			replaceM1OcservPasswordFile(t, ctx, container, m1OcservRejectedPasswordFile)
-			rekey := waitForM1ConfigurationEvent(t, ctx, events)
+			replaceOcservPasswordFile(t, ctx, container, ocservRejectedPasswordFile)
+			rekey := waitForConfigurationEvent(t, ctx, events)
 			if rekey.Reason != openconnect.TunnelConfigurationEventRekey {
 				t.Fatalf("negotiated %s rekey reported %s", method, rekey.Reason)
 			}
 			if form := client.PendingAuthChallenge(); form != nil {
 				t.Fatalf("rekey did not reuse the ocserv session cookie: %#v", form)
 			}
-			exchangeM1TunnelEcho(t, ctx, client, 0x4d33, 1, "sing-openconnect-m1-rekey-"+method)
+			exchangeTunnelEcho(t, ctx, client, 0x4d33, 1, "sing-openconnect-rekey-"+method)
 		})
 	}
 
 	t.Run("disconnect-cookie-reuse-then-cookie-rejection", func(t *testing.T) {
-		container := startM1OcservContainer(t, ctx, m1OcservOptions{
+		container := startOcservContainer(t, ctx, ocservOptions{
 			authentication: `auth = "plain[passwd=/fixture/ocpasswd]"`,
 			keepalive:      60,
 			dpd:            30,
 			rekeyMethod:    "new-tunnel",
-			files:          map[string][]byte{"ocpasswd": []byte(m1OcservPasswordFile)},
+			files:          map[string][]byte{"ocpasswd": []byte(ocservPasswordFile)},
 		})
-		rejectedContainer := startM1OcservContainer(t, ctx, m1OcservOptions{
+		rejectedContainer := startOcservContainer(t, ctx, ocservOptions{
 			authentication: `auth = "plain[passwd=/fixture/ocpasswd]"`,
 			keepalive:      60,
 			dpd:            30,
 			rekeyMethod:    "new-tunnel",
-			files:          map[string][]byte{"ocpasswd": []byte(m1OcservRejectedPasswordFile)},
+			files:          map[string][]byte{"ocpasswd": []byte(ocservRejectedPasswordFile)},
 		})
 		events := make(chan openconnect.TunnelConfigurationEvent, 16)
-		dialer := new(m1ConnectionDroppingDialer)
-		client := newM1AnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
+		dialer := new(connectionDroppingDialer)
+		client := newAnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
 			Username: ocservUsername,
 			Password: ocservPassword,
 			NoUDP:    true,
@@ -427,26 +427,26 @@ func TestM1AnyConnectRekeyAndReconnectInterop(t *testing.T) {
 				return nil
 			},
 		})
-		startM1Client(t, client)
-		initial := waitForM1ConfigurationEvent(t, ctx, events)
+		startClient(t, client)
+		initial := waitForConfigurationEvent(t, ctx, events)
 		if initial.Reason != openconnect.TunnelConfigurationEventInitial {
 			t.Fatalf("unexpected initial configuration reason: %s", initial.Reason)
 		}
-		replaceM1OcservPasswordFile(t, ctx, container, m1OcservRejectedPasswordFile)
+		replaceOcservPasswordFile(t, ctx, container, ocservRejectedPasswordFile)
 		dialer.dropNewest(t)
-		reestablishment := waitForM1ConfigurationEvent(t, ctx, events)
+		reestablishment := waitForConfigurationEvent(t, ctx, events)
 		if reestablishment.Reason != openconnect.TunnelConfigurationEventReestablishment {
 			t.Fatalf("ordinary disconnect reported %s", reestablishment.Reason)
 		}
 		if form := client.PendingAuthChallenge(); form != nil {
 			t.Fatalf("ordinary reconnect did not reuse the ocserv session cookie: %#v", form)
 		}
-		exchangeM1TunnelEcho(t, ctx, client, 0x4d33, 2, "sing-openconnect-m1-reconnect")
+		exchangeTunnelEcho(t, ctx, client, 0x4d33, 2, "sing-openconnect-reconnect")
 
 		dialer.switchToReplacementAndDropNewest(t, M.ParseSocksaddr(rejectedContainer.tcpAddress))
 		reauthenticationContext, cancelReauthentication := context.WithTimeout(ctx, 30*time.Second)
 		defer cancelReauthentication()
-		form := waitForM1AuthForm(t, reauthenticationContext, client)
+		form := waitForAuthForm(t, reauthenticationContext, client)
 		if form == nil {
 			t.Fatal("invalidated cookie reauthentication completed without prompting")
 		}
@@ -465,15 +465,15 @@ func TestM1AnyConnectRekeyAndReconnectInterop(t *testing.T) {
 		if !passwordField {
 			t.Fatalf("invalidated cookie did not require password authentication: %#v", form)
 		}
-		assertM1OcservReconnectRequestEvidence(t, ctx, container, rejectedContainer)
+		assertOcservReconnectRequestEvidence(t, ctx, container, rejectedContainer)
 	})
 }
 
-func assertM1OcservReconnectRequestEvidence(
+func assertOcservReconnectRequestEvidence(
 	t *testing.T,
 	ctx context.Context,
-	primary m1OcservContainer,
-	rejected m1OcservContainer,
+	primary fixtureOcservContainer,
+	rejected fixtureOcservContainer,
 ) {
 	t.Helper()
 	primaryLogs, err := dockerOutput(ctx, "logs", primary.name)
@@ -509,7 +509,7 @@ func assertM1OcservReconnectRequestEvidence(
 	}
 }
 
-func startM1OcservContainer(t *testing.T, ctx context.Context, options m1OcservOptions) m1OcservContainer {
+func startOcservContainer(t *testing.T, ctx context.Context, options ocservOptions) fixtureOcservContainer {
 	t.Helper()
 	_, err := dockerOutput(ctx, "version", "--format", "{{.Server.Version}}")
 	if err != nil {
@@ -545,7 +545,7 @@ func startM1OcservContainer(t *testing.T, ctx context.Context, options m1OcservO
 		t.Fatal(E.Cause(err, "make ocserv fixture directory readable"))
 	}
 	configuration := fmt.Sprintf(
-		m1OcservConfiguration,
+		ocservConfiguration,
 		options.authentication,
 		serverCertificatePath,
 		serverKeyPath,
@@ -555,9 +555,9 @@ func startM1OcservContainer(t *testing.T, ctx context.Context, options m1OcservO
 		options.rekeyMethod,
 		options.extra,
 	)
-	writeM1FixtureFile(t, fixtureDirectory, "ocserv.conf", []byte(configuration))
+	writeFixtureFile(t, fixtureDirectory, "ocserv.conf", []byte(configuration))
 	for name, content := range options.files {
-		writeM1FixtureFile(t, fixtureDirectory, name, content)
+		writeFixtureFile(t, fixtureDirectory, name, content)
 	}
 	containerOutput, err := dockerOutput(
 		ctx,
@@ -582,7 +582,7 @@ func startM1OcservContainer(t *testing.T, ctx context.Context, options m1OcservO
 			logs, logsErr := dockerOutput(logsContext, "logs", containerName)
 			cancelLogs()
 			if logsErr == nil {
-				t.Log("M1 ocserv logs:\n" + logs)
+				t.Log("ocserv logs:\n" + logs)
 			}
 		}
 		removeContext, cancelRemove := context.WithTimeout(context.Background(), 5*time.Second)
@@ -592,14 +592,14 @@ func startM1OcservContainer(t *testing.T, ctx context.Context, options m1OcservO
 	tcpAddress := dockerPublishedAddress(t, ctx, containerName, "443/tcp")
 	udpAddress := dockerPublishedAddress(t, ctx, containerName, "443/udp")
 	waitForTCP(t, ctx, tcpAddress)
-	return m1OcservContainer{
+	return fixtureOcservContainer{
 		ocservContainer:  ocservContainer{tcpAddress: tcpAddress, udpAddress: udpAddress},
 		name:             containerName,
 		fixtureDirectory: fixtureDirectory,
 	}
 }
 
-func writeM1FixtureFile(t *testing.T, directory string, name string, content []byte) {
+func writeFixtureFile(t *testing.T, directory string, name string, content []byte) {
 	t.Helper()
 	err := os.WriteFile(filepath.Join(directory, name), content, 0o644)
 	if err != nil {
@@ -607,7 +607,7 @@ func writeM1FixtureFile(t *testing.T, directory string, name string, content []b
 	}
 }
 
-func newM1AnyConnectClient(t *testing.T, ctx context.Context, server string, options openconnect.ClientOptions) *openconnect.Client {
+func newAnyConnectClient(t *testing.T, ctx context.Context, server string, options openconnect.ClientOptions) *openconnect.Client {
 	t.Helper()
 	options.Context = ctx
 	options.Server = server
@@ -617,22 +617,22 @@ func newM1AnyConnectClient(t *testing.T, ctx context.Context, server string, opt
 	}
 	client, err := openconnect.NewClient(options)
 	if err != nil {
-		t.Fatal(E.Cause(err, "create M1 AnyConnect client"))
+		t.Fatal(E.Cause(err, "create AnyConnect client"))
 	}
 	t.Cleanup(func() {
 		closeErr := client.Close()
 		if closeErr != nil && !E.IsClosed(closeErr) {
-			t.Error(E.Cause(closeErr, "close M1 AnyConnect client"))
+			t.Error(E.Cause(closeErr, "close AnyConnect client"))
 		}
 	})
 	return client
 }
 
-func startM1Client(t *testing.T, client *openconnect.Client) {
+func startClient(t *testing.T, client *openconnect.Client) {
 	t.Helper()
 	err := client.Start()
 	if err != nil {
-		t.Fatal(E.Cause(err, "start M1 AnyConnect client"))
+		t.Fatal(E.Cause(err, "start AnyConnect client"))
 	}
 }
 
@@ -667,35 +667,35 @@ func waitForActiveTransportUpdate(
 	}
 }
 
-func waitForM1Ready(t *testing.T, ctx context.Context, client *openconnect.Client) {
+func waitForReady(t *testing.T, ctx context.Context, client *openconnect.Client) {
 	t.Helper()
 	for !client.Ready() {
-		waitForM1ClientStateChange(t, ctx, client)
+		waitForClientStateChange(t, ctx, client)
 	}
 }
 
-func waitForM1ClientStateChange(t *testing.T, ctx context.Context, client *openconnect.Client) {
+func waitForClientStateChange(t *testing.T, ctx context.Context, client *openconnect.Client) {
 	t.Helper()
 	updated := client.AuthChallengeUpdated()
 	select {
 	case <-ctx.Done():
-		t.Fatal(E.Cause(ctx.Err(), "wait for M1 AnyConnect client state"))
+		t.Fatal(E.Cause(ctx.Err(), "wait for AnyConnect client state"))
 	case <-updated:
 	case <-time.After(20 * time.Millisecond):
 	}
 }
 
-func waitForM1AuthForm(t *testing.T, ctx context.Context, client *openconnect.Client) *openconnect.AuthChallenge {
+func waitForAuthForm(t *testing.T, ctx context.Context, client *openconnect.Client) *openconnect.AuthChallenge {
 	t.Helper()
-	return waitForM1AuthFormState(t, ctx, client, false)
+	return waitForAuthFormState(t, ctx, client, false)
 }
 
-func waitForM1AuthFormOrReady(t *testing.T, ctx context.Context, client *openconnect.Client) *openconnect.AuthChallenge {
+func waitForAuthFormOrReady(t *testing.T, ctx context.Context, client *openconnect.Client) *openconnect.AuthChallenge {
 	t.Helper()
-	return waitForM1AuthFormState(t, ctx, client, true)
+	return waitForAuthFormState(t, ctx, client, true)
 }
 
-func waitForM1AuthFormState(
+func waitForAuthFormState(
 	t *testing.T,
 	ctx context.Context,
 	client *openconnect.Client,
@@ -713,14 +713,14 @@ func waitForM1AuthFormState(
 		updated := client.AuthChallengeUpdated()
 		select {
 		case <-ctx.Done():
-			t.Fatal(E.Cause(ctx.Err(), "wait for M1 AnyConnect authentication form"))
+			t.Fatal(E.Cause(ctx.Err(), "wait for AnyConnect authentication form"))
 		case <-updated:
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
 }
 
-func waitForM1ConfigurationEvent(
+func waitForConfigurationEvent(
 	t *testing.T,
 	ctx context.Context,
 	events <-chan openconnect.TunnelConfigurationEvent,
@@ -728,14 +728,14 @@ func waitForM1ConfigurationEvent(
 	t.Helper()
 	select {
 	case <-ctx.Done():
-		t.Fatal(E.Cause(ctx.Err(), "wait for M1 tunnel configuration event"))
+		t.Fatal(E.Cause(ctx.Err(), "wait for tunnel configuration event"))
 	case event := <-events:
 		return event
 	}
 	return openconnect.TunnelConfigurationEvent{}
 }
 
-func exchangeM1TunnelEcho(
+func exchangeTunnelEcho(
 	t *testing.T,
 	ctx context.Context,
 	client *openconnect.Client,
@@ -751,14 +751,14 @@ func exchangeM1TunnelEcho(
 	request := buildIPv4ICMPEchoRequest(t, clientAddress, serverAddress, identifier, sequence, payload)
 	err := client.WriteDataPacket(request)
 	if err != nil {
-		t.Fatal(E.Cause(err, "write M1 AnyConnect tunnel echo"))
+		t.Fatal(E.Cause(err, "write AnyConnect tunnel echo"))
 	}
 	readContext, cancelRead := context.WithTimeout(ctx, 10*time.Second)
 	defer cancelRead()
 	for {
 		response, readErr := client.ReadDataPacket(readContext)
 		if readErr != nil {
-			t.Fatal(E.Cause(readErr, "read M1 AnyConnect tunnel echo"))
+			t.Fatal(E.Cause(readErr, "read AnyConnect tunnel echo"))
 		}
 		if len(response) == 0 || response[0]>>4 != 4 {
 			continue
@@ -771,20 +771,20 @@ func exchangeM1TunnelEcho(
 	}
 }
 
-func assertM1OcservUserGroup(t *testing.T, ctx context.Context, container m1OcservContainer, username string, group string) {
+func assertOcservUserGroup(t *testing.T, ctx context.Context, container fixtureOcservContainer, username string, group string) {
 	t.Helper()
-	output := runM1Occtl(t, ctx, container, "show", "user", username)
+	output := runOcctl(t, ctx, container, "show", "user", username)
 	if !strings.Contains(output, username) || !strings.Contains(output, group) {
 		t.Fatalf("ocserv did not record user %q in group %q:\n%s", username, group, output)
 	}
 }
 
-func waitForM1OcservUserAbsent(t *testing.T, ctx context.Context, container m1OcservContainer, username string) {
+func waitForOcservUserAbsent(t *testing.T, ctx context.Context, container fixtureOcservContainer, username string) {
 	t.Helper()
 	waitContext, cancelWait := context.WithTimeout(ctx, 10*time.Second)
 	defer cancelWait()
 	for {
-		output := runM1Occtl(t, waitContext, container, "show", "users")
+		output := runOcctl(t, waitContext, container, "show", "users")
 		if !strings.Contains(output, username) {
 			return
 		}
@@ -796,15 +796,15 @@ func waitForM1OcservUserAbsent(t *testing.T, ctx context.Context, container m1Oc
 	}
 }
 
-func assertM1OcservUsername(t *testing.T, ctx context.Context, container m1OcservContainer, username string) {
+func assertOcservUsername(t *testing.T, ctx context.Context, container fixtureOcservContainer, username string) {
 	t.Helper()
-	output := runM1Occtl(t, ctx, container, "show", "user", username)
+	output := runOcctl(t, ctx, container, "show", "user", username)
 	if !strings.Contains(output, username) {
 		t.Fatalf("ocserv did not record certificate username %q:\n%s", username, output)
 	}
 }
 
-func assertM1OATHConsumerUpdated(t *testing.T, container m1OcservContainer, tokenType string) {
+func assertOATHConsumerUpdated(t *testing.T, container fixtureOcservContainer, tokenType string) {
 	t.Helper()
 	content, err := os.ReadFile(filepath.Join(container.fixtureDirectory, "users.oath"))
 	if err != nil {
@@ -816,7 +816,7 @@ func assertM1OATHConsumerUpdated(t *testing.T, container m1OcservContainer, toke
 	}
 }
 
-func runM1Occtl(t *testing.T, ctx context.Context, container m1OcservContainer, arguments ...string) string {
+func runOcctl(t *testing.T, ctx context.Context, container fixtureOcservContainer, arguments ...string) string {
 	t.Helper()
 	dockerArguments := []string{"exec", container.name, "occtl", "-s", "/run/occtl.socket"}
 	dockerArguments = append(dockerArguments, arguments...)
@@ -827,7 +827,7 @@ func runM1Occtl(t *testing.T, ctx context.Context, container m1OcservContainer, 
 	return output
 }
 
-func replaceM1OcservPasswordFile(t *testing.T, ctx context.Context, container m1OcservContainer, content string) {
+func replaceOcservPasswordFile(t *testing.T, ctx context.Context, container fixtureOcservContainer, content string) {
 	t.Helper()
 	path := filepath.Join(container.fixtureDirectory, "ocpasswd.replacement")
 	err := os.WriteFile(path, []byte(content), 0o644)
@@ -840,16 +840,16 @@ func replaceM1OcservPasswordFile(t *testing.T, ctx context.Context, container m1
 	}
 }
 
-func createM1ClientCertificate(t *testing.T, username string) ([]byte, []byte, []byte) {
+func createClientCertificate(t *testing.T, username string) ([]byte, []byte, []byte) {
 	t.Helper()
 	now := time.Now()
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		t.Fatal(E.Cause(err, "generate M1 client CA key"))
+		t.Fatal(E.Cause(err, "generate client CA key"))
 	}
 	caTemplate := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "sing-openconnect M1 client CA"},
+		Subject:               pkix.Name{CommonName: "sing-openconnect client CA"},
 		NotBefore:             now.Add(-time.Hour),
 		NotAfter:              now.Add(24 * time.Hour),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
@@ -858,11 +858,11 @@ func createM1ClientCertificate(t *testing.T, username string) ([]byte, []byte, [
 	}
 	caData, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, caKey.Public(), caKey)
 	if err != nil {
-		t.Fatal(E.Cause(err, "create M1 client CA certificate"))
+		t.Fatal(E.Cause(err, "create client CA certificate"))
 	}
 	clientKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		t.Fatal(E.Cause(err, "generate M1 TLS client key"))
+		t.Fatal(E.Cause(err, "generate TLS client key"))
 	}
 	clientTemplate := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
@@ -874,30 +874,30 @@ func createM1ClientCertificate(t *testing.T, username string) ([]byte, []byte, [
 	}
 	clientData, err := x509.CreateCertificate(rand.Reader, clientTemplate, caTemplate, clientKey.Public(), caKey)
 	if err != nil {
-		t.Fatal(E.Cause(err, "create M1 TLS client certificate"))
+		t.Fatal(E.Cause(err, "create TLS client certificate"))
 	}
 	clientKeyData, err := x509.MarshalPKCS8PrivateKey(clientKey)
 	if err != nil {
-		t.Fatal(E.Cause(err, "marshal M1 TLS client key"))
+		t.Fatal(E.Cause(err, "marshal TLS client key"))
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caData}),
 		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: clientData}),
 		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: clientKeyData})
 }
 
-func (d *m1FailingUDPDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+func (d *failingUDPDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	if network == N.NetworkUDP {
 		d.attempts.Add(1)
-		return nil, E.New("M1 deliberate UDP dial failure")
+		return nil, E.New("deliberate UDP dial failure")
 	}
 	return N.SystemDialer.DialContext(ctx, network, destination)
 }
 
-func (d *m1FailingUDPDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+func (d *failingUDPDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
 	return N.SystemDialer.ListenPacket(ctx, destination)
 }
 
-func (d *m1ConnectionDroppingDialer) DialContext(
+func (d *connectionDroppingDialer) DialContext(
 	ctx context.Context,
 	network string,
 	destination M.Socksaddr,
@@ -920,35 +920,35 @@ func (d *m1ConnectionDroppingDialer) DialContext(
 	return conn, nil
 }
 
-func (d *m1ConnectionDroppingDialer) ListenPacket(
+func (d *connectionDroppingDialer) ListenPacket(
 	ctx context.Context,
 	destination M.Socksaddr,
 ) (net.PacketConn, error) {
 	return N.SystemDialer.ListenPacket(ctx, destination)
 }
 
-func (d *m1ConnectionDroppingDialer) dropNewest(t *testing.T) {
+func (d *connectionDroppingDialer) dropNewest(t *testing.T) {
 	t.Helper()
 	d.access.Lock()
 	if len(d.connections) == 0 {
 		d.access.Unlock()
-		t.Fatal("M1 connection dropper did not observe a TCP connection")
+		t.Fatal("connection dropper did not observe a TCP connection")
 	}
 	conn := d.connections[len(d.connections)-1]
 	d.connections = d.connections[:len(d.connections)-1]
 	d.access.Unlock()
 	err := conn.Close()
 	if err != nil && !E.IsClosed(err) {
-		t.Fatal(E.Cause(err, "drop M1 CSTP connection"))
+		t.Fatal(E.Cause(err, "drop CSTP connection"))
 	}
 }
 
-func (d *m1ConnectionDroppingDialer) switchToReplacementAndDropNewest(t *testing.T, replacement M.Socksaddr) {
+func (d *connectionDroppingDialer) switchToReplacementAndDropNewest(t *testing.T, replacement M.Socksaddr) {
 	t.Helper()
 	d.access.Lock()
 	if len(d.connections) == 0 {
 		d.access.Unlock()
-		t.Fatal("no M1 TCP connection available before backend switch")
+		t.Fatal("no TCP connection available before backend switch")
 	}
 	d.replacement = replacement
 	d.useReplacement = true
@@ -956,16 +956,16 @@ func (d *m1ConnectionDroppingDialer) switchToReplacementAndDropNewest(t *testing
 	d.access.Unlock()
 	err := connection.Close()
 	if err != nil && !E.IsClosed(err) {
-		t.Fatal(E.Cause(err, "drop M1 TCP connection while switching backend"))
+		t.Fatal(E.Cause(err, "drop TCP connection while switching backend"))
 	}
 }
 
-func waitForM1Warning(t *testing.T, ctx context.Context, logger *m1RecordingLogger, expected string) {
+func waitForWarning(t *testing.T, ctx context.Context, logger *recordingLogger, expected string) {
 	t.Helper()
 	for {
 		select {
 		case <-ctx.Done():
-			t.Fatal(E.Cause(ctx.Err(), "wait for M1 warning containing ", expected))
+			t.Fatal(E.Cause(ctx.Err(), "wait for warning containing ", expected))
 		case warning := <-logger.warnings:
 			if strings.Contains(warning, expected) {
 				return
@@ -974,17 +974,17 @@ func waitForM1Warning(t *testing.T, ctx context.Context, logger *m1RecordingLogg
 	}
 }
 
-func (l *m1RecordingLogger) log(arguments ...any) {
+func (l *recordingLogger) log(arguments ...any) {
 	l.access.Lock()
 	l.t.Helper()
 	l.t.Log(fmt.Sprint(arguments...))
 	l.access.Unlock()
 }
 
-func (l *m1RecordingLogger) Trace(arguments ...any) { l.log(arguments...) }
-func (l *m1RecordingLogger) Debug(arguments ...any) { l.log(arguments...) }
-func (l *m1RecordingLogger) Info(arguments ...any)  { l.log(arguments...) }
-func (l *m1RecordingLogger) Warn(arguments ...any) {
+func (l *recordingLogger) Trace(arguments ...any) { l.log(arguments...) }
+func (l *recordingLogger) Debug(arguments ...any) { l.log(arguments...) }
+func (l *recordingLogger) Info(arguments ...any)  { l.log(arguments...) }
+func (l *recordingLogger) Warn(arguments ...any) {
 	message := fmt.Sprint(arguments...)
 	l.log(message)
 	select {
@@ -992,34 +992,34 @@ func (l *m1RecordingLogger) Warn(arguments ...any) {
 	default:
 	}
 }
-func (l *m1RecordingLogger) Error(arguments ...any) { l.log(arguments...) }
-func (l *m1RecordingLogger) Fatal(arguments ...any) { l.log(arguments...) }
-func (l *m1RecordingLogger) Panic(arguments ...any) { l.log(arguments...) }
+func (l *recordingLogger) Error(arguments ...any) { l.log(arguments...) }
+func (l *recordingLogger) Fatal(arguments ...any) { l.log(arguments...) }
+func (l *recordingLogger) Panic(arguments ...any) { l.log(arguments...) }
 
-func (l *m1RecordingLogger) TraceContext(_ context.Context, arguments ...any) {
+func (l *recordingLogger) TraceContext(_ context.Context, arguments ...any) {
 	l.Trace(arguments...)
 }
 
-func (l *m1RecordingLogger) DebugContext(_ context.Context, arguments ...any) {
+func (l *recordingLogger) DebugContext(_ context.Context, arguments ...any) {
 	l.Debug(arguments...)
 }
 
-func (l *m1RecordingLogger) InfoContext(_ context.Context, arguments ...any) {
+func (l *recordingLogger) InfoContext(_ context.Context, arguments ...any) {
 	l.Info(arguments...)
 }
 
-func (l *m1RecordingLogger) WarnContext(_ context.Context, arguments ...any) {
+func (l *recordingLogger) WarnContext(_ context.Context, arguments ...any) {
 	l.Warn(arguments...)
 }
 
-func (l *m1RecordingLogger) ErrorContext(_ context.Context, arguments ...any) {
+func (l *recordingLogger) ErrorContext(_ context.Context, arguments ...any) {
 	l.Error(arguments...)
 }
 
-func (l *m1RecordingLogger) FatalContext(_ context.Context, arguments ...any) {
+func (l *recordingLogger) FatalContext(_ context.Context, arguments ...any) {
 	l.Fatal(arguments...)
 }
 
-func (l *m1RecordingLogger) PanicContext(_ context.Context, arguments ...any) {
+func (l *recordingLogger) PanicContext(_ context.Context, arguments ...any) {
 	l.Panic(arguments...)
 }

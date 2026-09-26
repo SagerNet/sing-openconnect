@@ -17,26 +17,26 @@ import (
 	openconnect "github.com/sagernet/sing-openconnect"
 )
 
-const m1OcservSPKISHA256 = "sha256:c69dec71fcf2deb390b2ff4d70ebdeffc61556ffa91ebe2a3425c45eb365e6cf"
+const ocservSPKISHA256 = "sha256:c69dec71fcf2deb390b2ff4d70ebdeffc61556ffa91ebe2a3425c45eb365e6cf"
 
-func TestM1AnyConnectTLSInterop(t *testing.T) {
+func TestAnyConnectTLSInterop(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	t.Cleanup(cancel)
 
 	//nolint:paralleltest // Each case completes and cleans up its real ocserv session before the next case.
 	t.Run("certificate-authority-and-server-name", func(t *testing.T) {
-		certificateAuthority, serverCertificate, serverKey := createM1OcservTLSIdentity(t)
-		container := startM1OcservContainer(t, ctx, m1OcservOptions{
+		certificateAuthority, serverCertificate, serverKey := createOcservTLSIdentity(t)
+		container := startOcservContainer(t, ctx, ocservOptions{
 			authentication:    `auth = "plain[passwd=/fixture/ocpasswd]"`,
 			keepalive:         60,
 			dpd:               30,
 			rekeyMethod:       "new-tunnel",
-			files:             map[string][]byte{"ocpasswd": []byte(m1OcservPasswordFile)},
+			files:             map[string][]byte{"ocpasswd": []byte(ocservPasswordFile)},
 			serverCertificate: serverCertificate,
 			serverKey:         serverKey,
 		})
-		client := newM1AnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
+		client := newAnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
 			Username: ocservUsername,
 			Password: ocservPassword,
 			NoUDP:    true,
@@ -47,38 +47,38 @@ func TestM1AnyConnectTLSInterop(t *testing.T) {
 				CertificateAuthority: openconnect.Material{Content: certificateAuthority},
 			},
 		})
-		startM1Client(t, client)
-		waitForM1Ready(t, ctx, client)
-		exchangeM1TunnelEcho(t, ctx, client, 0x4d35, 1, "sing-openconnect-m1-tls-ca")
+		startClient(t, client)
+		waitForReady(t, ctx, client)
+		exchangeTunnelEcho(t, ctx, client, 0x4d35, 1, "sing-openconnect-tls-ca")
 	})
 
-	pinnedContainer := startM1OcservContainer(t, ctx, m1OcservOptions{
+	pinnedContainer := startOcservContainer(t, ctx, ocservOptions{
 		authentication: `auth = "plain[passwd=/fixture/ocpasswd]"`,
 		keepalive:      60,
 		dpd:            30,
 		rekeyMethod:    "new-tunnel",
-		files:          map[string][]byte{"ocpasswd": []byte(m1OcservPasswordFile)},
+		files:          map[string][]byte{"ocpasswd": []byte(ocservPasswordFile)},
 	})
 	//nolint:paralleltest // The pin cases intentionally take turns using the same real ocserv account.
 	t.Run("peer-spki-fingerprint", func(t *testing.T) {
-		client := newM1AnyConnectClient(t, ctx, pinnedContainer.tcpAddress, openconnect.ClientOptions{
+		client := newAnyConnectClient(t, ctx, pinnedContainer.tcpAddress, openconnect.ClientOptions{
 			Username: ocservUsername,
 			Password: ocservPassword,
 			NoUDP:    true,
 			TLSConfig: openconnect.ClientTLSOptions{
 				Config:              &tls.Config{MinVersion: tls.VersionTLS12},
 				SystemTrustDisabled: true,
-				PeerFingerprints:    []string{m1OcservSPKISHA256},
+				PeerFingerprints:    []string{ocservSPKISHA256},
 			},
 		})
-		startM1Client(t, client)
-		waitForM1Ready(t, ctx, client)
-		exchangeM1TunnelEcho(t, ctx, client, 0x4d35, 2, "sing-openconnect-m1-tls-pin")
+		startClient(t, client)
+		waitForReady(t, ctx, client)
+		exchangeTunnelEcho(t, ctx, client, 0x4d35, 2, "sing-openconnect-tls-pin")
 	})
 
 	//nolint:paralleltest // The pin cases intentionally take turns using the same real ocserv account.
 	t.Run("wrong-peer-spki-fingerprint", func(t *testing.T) {
-		client := newM1AnyConnectClient(t, ctx, pinnedContainer.tcpAddress, openconnect.ClientOptions{
+		client := newAnyConnectClient(t, ctx, pinnedContainer.tcpAddress, openconnect.ClientOptions{
 			Username: ocservUsername,
 			Password: ocservPassword,
 			NoUDP:    true,
@@ -90,7 +90,7 @@ func TestM1AnyConnectTLSInterop(t *testing.T) {
 				},
 			},
 		})
-		startM1Client(t, client)
+		startClient(t, client)
 		failureContext, cancelFailure := context.WithTimeout(ctx, 10*time.Second)
 		defer cancelFailure()
 		_, err := client.ReadDataPacket(failureContext)
@@ -100,7 +100,7 @@ func TestM1AnyConnectTLSInterop(t *testing.T) {
 	})
 }
 
-func createM1OcservTLSIdentity(t *testing.T) ([]byte, []byte, []byte) {
+func createOcservTLSIdentity(t *testing.T) ([]byte, []byte, []byte) {
 	t.Helper()
 	now := time.Now()
 	certificateAuthorityKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
