@@ -11,44 +11,44 @@ import (
 	N "github.com/sagernet/sing/common/network"
 )
 
-type m1DTLSDialer struct {
+type dTLSDialer struct {
 	udpDestination M.Socksaddr
 }
 
-func TestM1AnyConnectProductionDTLSInterop(t *testing.T) {
+func TestAnyConnectProductionDTLSInterop(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
-	container := startM1OcservContainer(t, ctx, m1OcservOptions{
+	container := startOcservContainer(t, ctx, ocservOptions{
 		authentication: `auth = "plain[passwd=/fixture/ocpasswd]"`,
 		keepalive:      60,
 		dpd:            30,
 		rekeyMethod:    "new-tunnel",
-		files:          map[string][]byte{"ocpasswd": []byte(m1OcservPasswordFile)},
+		files:          map[string][]byte{"ocpasswd": []byte(ocservPasswordFile)},
 	})
-	client := newM1AnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
+	client := newAnyConnectClient(t, ctx, container.tcpAddress, openconnect.ClientOptions{
 		Username: ocservUsername,
 		Password: ocservPassword,
-		Dialer: &m1DTLSDialer{
+		Dialer: &dTLSDialer{
 			udpDestination: M.ParseSocksaddr(container.udpAddress),
 		},
 	})
 	activeTransportUpdated := client.ActiveTransportUpdated()
-	startM1Client(t, client)
-	waitForM1Ready(t, ctx, client)
+	startClient(t, client)
+	waitForReady(t, ctx, client)
 	if client.ActiveTransport() != openconnect.TransportDTLS {
 		waitForActiveTransportUpdate(t, ctx, client, activeTransportUpdated, openconnect.TransportDTLS)
 	}
-	exchangeM1TunnelEcho(t, ctx, client, 0x4d34, 1, "sing-openconnect-m1-production-dtls")
+	exchangeTunnelEcho(t, ctx, client, 0x4d34, 1, "sing-openconnect-production-dtls")
 }
 
-func (d *m1DTLSDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+func (d *dTLSDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	if network == N.NetworkUDP {
 		destination = d.udpDestination
 	}
 	return N.SystemDialer.DialContext(ctx, network, destination)
 }
 
-func (d *m1DTLSDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+func (d *dTLSDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
 	return N.SystemDialer.ListenPacket(ctx, destination)
 }
