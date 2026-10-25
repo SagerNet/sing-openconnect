@@ -26,6 +26,7 @@ const (
 	f5MaximumAuthenticationRedirects = 10
 	f5LogoutTimeout                  = 5 * time.Second
 	f5DefaultUserAgent               = "AnyConnect-compatible OpenConnect VPN Agent " + defaultClientVersion
+	f5SAMLFinalPath                  = "/vdesk/webtop.eui"
 )
 
 type f5Frontend struct {
@@ -49,6 +50,7 @@ type f5Authentication struct {
 	primaryPasswordSeen bool
 	primaryPasswordSent bool
 	currentFormPrimary  bool
+	currentSAML         bool
 	started             bool
 	completed           bool
 	closed              bool
@@ -189,6 +191,7 @@ func (a *f5Authentication) Advance(
 	started := a.started
 	currentForm := a.currentForm
 	currentFormPrimary := a.currentFormPrimary
+	currentSAML := a.currentSAML
 	if !started {
 		a.started = true
 	}
@@ -203,6 +206,12 @@ func (a *f5Authentication) Advance(
 			return nil, nil, E.Extend(ErrProtocolNotSupported, "unexpected form response before F5 authentication")
 		}
 		return a.doAuthenticationExchange(ctx, http.MethodGet, a.currentURL, "")
+	}
+	if currentSAML {
+		if response == nil || response.BrowserResult == nil {
+			return nil, nil, E.Extend(ErrProtocolNotSupported, "missing F5 SAML browser response")
+		}
+		return a.completeSAMLAuthentication(response.BrowserResult)
 	}
 	if response == nil || currentForm == nil {
 		return nil, nil, E.Extend(ErrProtocolNotSupported, "missing F5 authentication form response")
@@ -285,6 +294,9 @@ func (a *f5Authentication) doAuthenticationExchange(
 			location, locationErr := httpResponse.requestURL.Parse(locationHeader)
 			if locationErr != nil {
 				return nil, nil, markTerminal(E.Cause(locationErr, "parse F5 authentication redirect"))
+			}
+			if location.Query().Has("SAMLRequest") {
+				return a.beginSAMLAuthentication()
 			}
 			validationErr := validateHTTPSRequestURL(location)
 			if validationErr != nil {
@@ -397,6 +409,9 @@ func (a *f5Authentication) authenticationRequestFromDocument(
 		if a.frontend.client.options.Logger != nil {
 			a.frontend.client.options.Logger.WarnContext(a.frontend.client.options.Context, warning)
 		}
+	}
+	if form != nil && isF5SAMLRequestForm(form) {
+		return a.beginSAMLAuthentication()
 	}
 	a.access.Lock()
 	formNumber := a.formNumber
@@ -539,6 +554,72 @@ func (a *f5Authentication) resetAuthenticationJar() error {
 	return nil
 }
 
+// The gateway handed the logon off to a SAML identity provider. The browser
+// logs in from the gateway's own login URL so that the MRHSession it ends up
+// with is the one the identity provider authenticated. The page it lands on
+// depends on the gateway's webtop, so there is no final URL: like
+// openconnect's native F5 login, the session counts as authenticated once
+// the gateway has set F5_ST next to MRHSession, which it only does after the
+// access policy allowed the session.
+func (a *f5Authentication) beginSAMLAuthentication() (obtainedSession, *authenticationRequest, error) {
+	if a.frontend.client.options.ExternalAuthDisabled {
+		return nil, nil, markTerminal(E.Extend(ErrProtocolNotSupported, "gateway requested disabled external authentication"))
+	}
+	loginURL := cloneF5URL(a.frontend.client.serverURL)
+	a.access.Lock()
+	a.currentForm = nil
+	a.currentSAML = true
+	a.access.Unlock()
+	return nil, &authenticationRequest{
+		FormID:  "_saml",
+		Message: "Sign in through the identity provider, then read the gateway's MRHSession and F5_ST cookies.",
+		Browser: &BrowserRequest{
+			URL:         loginURL.String(),
+			CookieNames: []string{"MRHSession", "F5_ST"},
+		},
+	}, nil
+}
+
+func (a *f5Authentication) completeSAMLAuthentication(result *BrowserResult) (obtainedSession, *authenticationRequest, error) {
+	var mrhSession string
+	var f5ST string
+	for _, cookie := range result.Cookies {
+		// Tolerate a pasted "name=value" pair and surrounding whitespace.
+		value := strings.TrimPrefix(strings.TrimSpace(cookie.Value), cookie.Name+"=")
+		switch cookie.Name {
+		case "MRHSession":
+			mrhSession = value
+		case "F5_ST":
+			f5ST = value
+		}
+	}
+	if mrhSession == "" {
+		return nil, nil, E.Errors(ErrInvalidBrowserAuthentication, E.New("SAML browser result omitted MRHSession"))
+	}
+	jar, jarErr := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
+	if jarErr != nil {
+		return nil, nil, markTerminal(E.Cause(jarErr, "create F5 SAML cookie jar"))
+	}
+	serverURL := cloneF5URL(a.frontend.client.serverURL)
+	cookies := []*http.Cookie{{Name: "MRHSession", Value: mrhSession, Path: "/", Secure: true}}
+	if f5ST != "" {
+		cookies = append(cookies, &http.Cookie{Name: "F5_ST", Value: f5ST, Path: "/", Secure: true})
+	}
+	jar.SetCookies(serverURL, cookies)
+	a.access.Lock()
+	a.completed = true
+	a.currentSAML = false
+	a.access.Unlock()
+	return &f5SessionState{
+		frontend:                 a.frontend,
+		serverURL:                serverURL,
+		jar:                      jar,
+		mrhSession:               mrhSession,
+		f5ST:                     f5ST,
+		authenticationExpiration: parseF5AuthenticationExpiration(f5ST),
+	}, nil, nil
+}
+
 func encodeF5AuthenticationResponse(form *f5AuthenticationForm, response *authenticationResponse) (string, error) {
 	var encoded strings.Builder
 	for fieldIndex, field := range form.fields {
@@ -594,6 +675,15 @@ func isF5PrimaryAuthenticationForm(form *f5AuthenticationForm) bool {
 func f5FormHasPassword(form *f5AuthenticationForm) bool {
 	for _, field := range form.fields {
 		if field.kind == AuthFormFieldPassword {
+			return true
+		}
+	}
+	return false
+}
+
+func isF5SAMLRequestForm(form *f5AuthenticationForm) bool {
+	for _, field := range form.fields {
+		if field.name == "SAMLRequest" {
 			return true
 		}
 	}
