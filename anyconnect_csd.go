@@ -34,6 +34,7 @@ import (
 
 type anyConnectHostScanResponse struct {
 	statusCode int
+	header     http.Header
 	body       []byte
 }
 
@@ -161,7 +162,6 @@ func (a *anyConnectAuthentication) runHostScan(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	a.hostScan = anyConnectHostScan{}
 	a.hostScanCompleted = true
 	return nil
 }
@@ -320,14 +320,22 @@ func (a *anyConnectAuthentication) doAnyConnectHostScanRequest(
 	if closeErr != nil {
 		return anyConnectHostScanResponse{}, E.Cause(closeErr, "close AnyConnect CSD response")
 	}
-	return anyConnectHostScanResponse{statusCode: response.StatusCode, body: responseBody}, nil
+	return anyConnectHostScanResponse{statusCode: response.StatusCode, header: response.Header, body: responseBody}, nil
 }
 
+// Upstream cstp_obtain_cookie polls the CSD wait page without following redirects and treats a redirect as scan completion; Cisco ASA answers 302 once the report is accepted.
 func (a *anyConnectAuthentication) pollAnyConnectHostScanWait(ctx context.Context, client *http.Client, waitURL *url.URL) error {
+	waitClient := *client
+	waitClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	for {
-		response, err := a.doAnyConnectHostScanRequest(ctx, client, http.MethodGet, waitURL, "", nil)
+		response, err := a.doAnyConnectHostScanRequest(ctx, &waitClient, http.MethodGet, waitURL, "", nil)
 		if err != nil {
 			return err
+		}
+		if anyConnectRedirectStatus(response.statusCode) && response.header.Get("Location") != "" {
+			return nil
 		}
 		if response.statusCode != http.StatusOK {
 			return anyConnectHTTPStatusError(response.statusCode, "CSD wait request returned HTTP ")
