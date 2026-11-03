@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	E "github.com/sagernet/sing/common/exceptions"
 )
@@ -306,26 +307,28 @@ func parseF5Options(content []byte, authenticationExpiration time.Time) (*f5Tunn
 			switch {
 			case isF5IndexedName(name, "DNS") || isF5IndexedName(name, "DNS6_"):
 				if value != "" && dnsCount < 3 {
-					address, parseErr := netip.ParseAddr(value)
-					if parseErr != nil {
-						return nil, E.Cause(parseErr, "parse F5 DNS address")
+					for addressValue := range strings.FieldsFuncSeq(value, isF5ListSeparator) {
+						address, parseErr := netip.ParseAddr(addressValue)
+						if parseErr != nil {
+							return nil, E.Cause(parseErr, "parse F5 DNS address")
+						}
+						configuration.configuration.DNS = append(configuration.configuration.DNS, address.Unmap())
 					}
-					configuration.configuration.DNS = append(configuration.configuration.DNS, address.Unmap())
 					dnsCount++
 				}
 			case isF5IndexedName(name, "WINS"):
 				if value != "" && nbnsCount < 3 {
-					address, parseErr := netip.ParseAddr(value)
-					if parseErr != nil {
-						return nil, E.Cause(parseErr, "parse F5 NBNS address")
+					for addressValue := range strings.FieldsFuncSeq(value, isF5ListSeparator) {
+						address, parseErr := netip.ParseAddr(addressValue)
+						if parseErr != nil {
+							return nil, E.Cause(parseErr, "parse F5 NBNS address")
+						}
+						configuration.configuration.NBNS = append(configuration.configuration.NBNS, address.Unmap())
 					}
-					configuration.configuration.NBNS = append(configuration.configuration.NBNS, address.Unmap())
 					nbnsCount++
 				}
 			case isF5IndexedName(name, "DNSSuffix"):
-				if value != "" {
-					configuration.configuration.SearchDomains = append(configuration.configuration.SearchDomains, value)
-				}
+				configuration.configuration.SearchDomains = append(configuration.configuration.SearchDomains, strings.FieldsFunc(value, isF5ListSeparator)...)
 			case isF5IndexedName(name, "DNS_SPLIT"):
 				configuration.configuration.SplitDNS = append(configuration.configuration.SplitDNS, strings.Fields(value)...)
 			case isF5IndexedName(name, "LAN") || isF5IndexedName(name, "LAN6_"):
@@ -491,11 +494,15 @@ func isF5IndexedName(name string, prefix string) bool {
 	return name[len(prefix)] >= '0' && name[len(prefix)] <= '9'
 }
 
+func isF5ListSeparator(r rune) bool {
+	return r == ',' || unicode.IsSpace(r)
+}
+
 func parseF5Routes(value string) ([]TunnelRoute, error) {
 	words := strings.Fields(value)
 	routes := make([]TunnelRoute, 0, len(words))
 	for _, word := range words {
-		prefix, parseErr := netip.ParsePrefix(word)
+		prefix, parseErr := parseIPPrefix(word)
 		if parseErr != nil {
 			return nil, E.Cause(parseErr, "parse F5 route ", word)
 		}

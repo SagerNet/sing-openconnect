@@ -1,9 +1,14 @@
 package openconnect
 
 import (
+	"net"
 	"net/netip"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
+
+	E "github.com/sagernet/sing/common/exceptions"
 )
 
 const minimumIPv6MTU = 1280
@@ -118,4 +123,64 @@ func normalizeTunnelConfiguration(configuration TunnelConfiguration, ipv6Disable
 		configuration.Routes = append(configuration.Routes, TunnelRoute{Prefix: netip.PrefixFrom(netip.IPv6Unspecified(), 0)})
 	}
 	return configuration
+}
+
+func parseIPPrefix(value string) (netip.Prefix, error) {
+	value = strings.TrimSpace(value)
+	prefix, err := netip.ParsePrefix(value)
+	if err == nil {
+		return prefix, nil
+	}
+	addressText, maskText, hasMask := strings.Cut(value, "/")
+	address, err := netip.ParseAddr(addressText)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	if !hasMask {
+		return netip.PrefixFrom(address, address.BitLen()), nil
+	}
+	var bits int
+	if address.Is4() {
+		bits, err = parseIPv4NetmaskBits(maskText)
+	} else {
+		bits, err = parseIPv6NetmaskBits(maskText)
+	}
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	return netip.PrefixFrom(address, bits), nil
+}
+
+func parseIPv4NetmaskBits(value string) (int, error) {
+	value = strings.TrimSpace(value)
+	bits, decimalErr := strconv.Atoi(value)
+	if decimalErr == nil {
+		if bits < 0 || bits > 32 {
+			return 0, E.New("invalid IPv4 prefix length: ", value)
+		}
+		return bits, nil
+	}
+	address, err := netip.ParseAddr(value)
+	if err != nil || !address.Is4() {
+		return 0, E.New("invalid IPv4 netmask: ", value)
+	}
+	octets := address.As4()
+	ones, bits := net.IPMask(octets[:]).Size()
+	if bits == 0 {
+		return 0, E.New("non-contiguous IPv4 netmask: ", value)
+	}
+	return ones, nil
+}
+
+func parseIPv6NetmaskBits(value string) (int, error) {
+	address, err := netip.ParseAddr(strings.TrimSpace(value))
+	if err != nil || !address.Is6() {
+		return 0, E.New("invalid IPv6 netmask: ", value)
+	}
+	octets := address.As16()
+	ones, bits := net.IPMask(octets[:]).Size()
+	if bits == 0 {
+		return 0, E.New("non-contiguous IPv6 netmask: ", value)
+	}
+	return ones, nil
 }

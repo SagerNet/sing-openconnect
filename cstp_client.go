@@ -685,7 +685,7 @@ func parseCSTPAddresses(headers http.Header) ([]netip.Prefix, error) {
 	result := make([]netip.Prefix, 0, 2)
 	var ipv6Metadata []netip.Prefix
 	for _, value := range headers.Values("X-CSTP-Address-IP6") {
-		prefix, err := parseCSTPPrefix(value)
+		prefix, err := parseIPPrefix(value)
 		if err != nil {
 			return nil, E.Cause(err, "parse X-CSTP-Address-IP6")
 		}
@@ -710,7 +710,7 @@ func parseCSTPAddresses(headers http.Header) ([]netip.Prefix, error) {
 					var parseErr error
 					if strings.Contains(netmask, "/") {
 						var prefix netip.Prefix
-						prefix, parseErr = parseCSTPPrefix(netmask)
+						prefix, parseErr = parseIPPrefix(netmask)
 						prefixBits = prefix.Bits()
 					} else {
 						prefixBits, parseErr = parseIPv6NetmaskBits(netmask)
@@ -749,84 +749,13 @@ func parseCSTPRoutes(ipv4Values []string, ipv6Values []string) ([]TunnelRoute, e
 	values := append(append([]string(nil), ipv4Values...), ipv6Values...)
 	result := make([]TunnelRoute, 0, len(values))
 	for _, value := range values {
-		prefix, err := parseCSTPPrefix(value)
+		prefix, err := parseIPPrefix(value)
 		if err != nil {
 			return nil, E.Cause(err, "parse CSTP split route: ", value)
 		}
 		result = append(result, TunnelRoute{Prefix: prefix.Masked()})
 	}
 	return result, nil
-}
-
-func parseCSTPPrefix(value string) (netip.Prefix, error) {
-	value = strings.TrimSpace(value)
-	prefix, err := netip.ParsePrefix(value)
-	if err == nil {
-		return prefix, nil
-	}
-	addressText, maskText, hasMask := strings.Cut(value, "/")
-	if !hasMask {
-		address, addressErr := netip.ParseAddr(addressText)
-		if addressErr != nil {
-			return netip.Prefix{}, addressErr
-		}
-		return netip.PrefixFrom(address, address.BitLen()), nil
-	}
-	address, addressErr := netip.ParseAddr(addressText)
-	if addressErr != nil {
-		return netip.Prefix{}, addressErr
-	}
-	if !address.Is4() {
-		return netip.Prefix{}, err
-	}
-	bits, maskErr := parseIPv4NetmaskBits(maskText)
-	if maskErr != nil {
-		return netip.Prefix{}, maskErr
-	}
-	return netip.PrefixFrom(address, bits), nil
-}
-
-func parseIPv4NetmaskBits(value string) (int, error) {
-	value = strings.TrimSpace(value)
-	bits, decimalErr := strconv.Atoi(value)
-	if decimalErr == nil {
-		if bits < 0 || bits > 32 {
-			return 0, E.New("invalid IPv4 prefix length: ", value)
-		}
-		return bits, nil
-	}
-	address, err := netip.ParseAddr(value)
-	if err != nil || !address.Is4() {
-		return 0, E.New("invalid IPv4 netmask: ", value)
-	}
-	octets := address.As4()
-	ones, bits := net.IPMask(octets[:]).Size()
-	if ones == 0 && bits == 0 && value != "0.0.0.0" {
-		return 0, E.New("non-contiguous IPv4 netmask: ", value)
-	}
-	return ones, nil
-}
-
-func parseIPv6NetmaskBits(value string) (int, error) {
-	address, err := netip.ParseAddr(strings.TrimSpace(value))
-	if err != nil || !address.Is6() {
-		return 0, E.New("invalid IPv6 netmask: ", value)
-	}
-	octets := address.As16()
-	ones, bits := net.IPMask(octets[:]).Size()
-	if ones == 0 && bits == 0 {
-		allZero := true
-		for _, octet := range octets {
-			if octet != 0 {
-				allZero = false
-				break
-			}
-		}
-		if !allZero {
-			return 0, E.New("non-contiguous IPv6 netmask: ", value)
-		}
-	}
-	return ones, nil
 }
 
 func parseCSTPAddressesWithoutPrefix(primary []string, secondary []string, name string) ([]netip.Addr, error) {
