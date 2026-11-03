@@ -295,7 +295,7 @@ func (c *gpstChannel) connect() (*tls.Conn, error) {
 	}
 	classifiedErr := classifyGPTunnelHTTPStatus(statusCode, "GPST")
 	if classifiedErr == nil {
-		classifiedErr = markTerminal(E.Extend(ErrProtocolNotSupported, "GPST endpoint returned an HTTP response instead of START_TUNNEL"))
+		classifiedErr = E.Extend(ErrSessionRejected, "GPST endpoint returned HTTP 200 instead of START_TUNNEL")
 	}
 	return nil, E.Append(classifiedErr, closeErr, func(cause error) error {
 		return E.Cause(cause, "close failed GPST TLS connection")
