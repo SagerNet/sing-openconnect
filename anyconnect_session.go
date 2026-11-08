@@ -341,7 +341,7 @@ func (s *anyConnectCSTPSession) readLoop() {
 		case cstpPacketDisconnect, cstpPacketTerminate:
 			reason := renderCSTPDisconnectReason(packetBuffer.Bytes())
 			packetBuffer.Release()
-			s.terminate(markTerminal(E.New("server disconnected CSTP session: ", reason)))
+			s.terminate(E.New("server disconnected CSTP session: ", reason))
 			return
 		case cstpPacketCompressed:
 			if s.compression == anyConnectCompressionNone {

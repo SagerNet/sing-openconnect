@@ -282,22 +282,22 @@ func (s *pulseSession) handleESPRekey(payload []byte) error {
 func parsePulseFatalError(payload []byte) error {
 	message := strings.TrimSuffix(string(payload), "\n")
 	if !strings.HasPrefix(message, "errorType=") {
-		return markTerminal(E.New("server sent a malformed fatal error"))
+		return E.New("server sent a malformed fatal error")
 	}
 	reasonContent, encodedMessage, found := strings.Cut(message, " errorString=")
 	if !found {
-		return markTerminal(E.New("server sent a malformed fatal error"))
+		return E.New("server sent a malformed fatal error")
 	}
 	reasonText := strings.TrimPrefix(reasonContent, "errorType=")
 	reason, err := strconv.ParseUint(reasonText, 10, 32)
 	if err != nil {
-		return markTerminal(E.Cause(err, "parse Pulse fatal error reason"))
+		return E.Cause(err, "parse Pulse fatal error reason")
 	}
 	decodedMessage, err := url.QueryUnescape(encodedMessage)
 	if err != nil {
 		decodedMessage = encodedMessage
 	}
-	return markTerminal(E.New("fatal error ", reason, ": ", decodedMessage))
+	return E.New("fatal error ", reason, ": ", decodedMessage)
 }
 
 func (s *pulseSession) Done() <-chan error {
