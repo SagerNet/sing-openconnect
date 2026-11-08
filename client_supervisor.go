@@ -83,10 +83,21 @@ func (c *Client) runSupervisor(ctx context.Context) {
 	pendingRekeyEvent := false
 	reconnecting := false
 	var reconnectTimeoutRemaining time.Duration
+	var publishedAt time.Time
 	for {
 		if ctx.Err() != nil || c.isClosed() {
 			_ = closeObtainedSession(sessionState)
 			return
+		}
+		reconnectDelay := clientReconnectInitialBackoff - time.Since(publishedAt)
+		if reconnectDelay > 0 {
+			if c.options.Logger != nil {
+				c.options.Logger.DebugContext(ctx, "previous tunnel ended right after establishment; reconnecting in ", reconnectDelay)
+			}
+			if !c.waitClientReconnectBackoff(ctx, reconnectDelay, false, &reconnectTimeoutRemaining) {
+				_ = closeObtainedSession(sessionState)
+				return
+			}
 		}
 		if !c.waitResumed(ctx) {
 			_ = closeObtainedSession(sessionState)
@@ -243,6 +254,7 @@ func (c *Client) runSupervisor(ctx context.Context) {
 			_ = closeObtainedSession(sessionState)
 			return
 		}
+		publishedAt = time.Now()
 		c.publishTunnelConfigurationEvent(reason, configuration)
 		if c.options.Logger != nil {
 			if reason == TunnelConfigurationEventInitial {
@@ -285,7 +297,7 @@ func (c *Client) runSupervisor(ctx context.Context) {
 			reconnectTimeoutRemaining = c.options.ReconnectTimeout
 			backoff = clientReconnectInitialBackoff
 			if c.options.Logger != nil {
-				c.options.Logger.DebugContext(ctx, "established tunnel session was rejected; retrying immediately: ", sessionErr)
+				c.options.Logger.DebugContext(ctx, "established tunnel session was rejected; retrying: ", sessionErr)
 			}
 			continue
 		}
@@ -317,7 +329,7 @@ func (c *Client) runSupervisor(ctx context.Context) {
 		reconnectTimeoutRemaining = c.options.ReconnectTimeout
 		backoff = clientReconnectInitialBackoff
 		if c.options.Logger != nil {
-			c.options.Logger.DebugContext(ctx, "tunnel ended; retrying immediately: ", sessionErr)
+			c.options.Logger.DebugContext(ctx, "tunnel ended; retrying: ", sessionErr)
 		}
 	}
 }
