@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 
 	"golang.org/x/net/publicsuffix"
@@ -57,11 +58,11 @@ type anyConnectAuthentication struct {
 	authenticatedAddress           netip.Addr
 	peerCertificate                *x509.Certificate
 	selectedGroup                  string
-	serverGroupSelection           string
 	clientCertificateRetried       bool
 	clientCertificateFailureCount  int
 	clientCertificateFailureReason string
 	primaryPasswordSubmitted       bool
+	emptyForms                     int
 	tokenGenerator                 *softwareTokenGenerator
 	closed                         bool
 	advancing                      bool
@@ -135,6 +136,7 @@ func (f *anyConnectFrontend) BeginAuthentication() authContinuation {
 		currentURL:        &serverURL,
 		tokenGenerator:    newSoftwareTokenGenerator(f.client.options.Token),
 	}
+	authentication.selectedGroup = authentication.stableCredential(authCacheAuthGroup)
 	if f.client.options.XMLPostDisabled {
 		authentication.stage = anyConnectAuthenticationInitialLegacy
 		authentication.xmlPost = false
@@ -244,7 +246,7 @@ func (a *anyConnectAuthentication) Advance(
 
 func (a *anyConnectAuthentication) advanceInitialXML(ctx context.Context) (obtainedSession, *authenticationRequest, error) {
 	a.clearWebVPNCookie()
-	a.selectedGroup = a.stableCredential(authCacheAuthGroup)
+	a.primaryPasswordSubmitted = false
 	body, err := buildAnyConnectInitialXML(a.frontend.client, a.currentURL, a.selectedGroup, false)
 	if err != nil {
 		return nil, nil, err
@@ -308,13 +310,18 @@ func (a *anyConnectAuthentication) advanceAuthGroup(
 	if !loaded {
 		return nil, nil, E.Extend(ErrProtocolNotSupported, "authgroup response selected an unknown choice: ", selectedGroup)
 	}
-	a.selectedGroup = selectedChoice.Name
-	groupField.Value = selectedChoice.Name
-	applyAnyConnectAuthGroup(&a.currentForm, selectedChoice.Name)
-	if a.stageUsesXMLPost() && selectedChoice.Name != a.serverGroupSelection {
+	return a.selectAuthGroup(ctx, selectedChoice)
+}
+
+// Upstream process_auth_form takes the form's authgroup from the last group-select request, not from the option the gateway marks selected.
+func (a *anyConnectAuthentication) selectAuthGroup(ctx context.Context, choice anyConnectFormChoice) (obtainedSession, *authenticationRequest, error) {
+	if a.stageUsesXMLPost() && choice.Name != a.selectedGroup {
+		a.selectedGroup = choice.Name
 		a.stage = anyConnectAuthenticationInitialXML
 		return a.advanceInitialXML(ctx)
 	}
+	a.selectedGroup = choice.Name
+	applyAnyConnectAuthGroup(&a.currentForm, choice.Name)
 	return a.yieldAuthenticationRequest()
 }
 
@@ -322,6 +329,13 @@ func (a *anyConnectAuthentication) advanceForm(
 	ctx context.Context,
 	response *authenticationResponse,
 ) (obtainedSession, *authenticationRequest, error) {
+	groupField := findAnyConnectAuthGroup(&a.currentForm)
+	if groupField != nil {
+		choice, found := findAnyConnectChoice(groupField, response.Values[groupField.SubmissionKey])
+		if found && choice.Name != a.selectedGroup {
+			return a.selectAuthGroup(ctx, choice)
+		}
+	}
 	err := a.applyAuthenticationFieldValues(response, false)
 	if err != nil {
 		return nil, nil, err
@@ -367,7 +381,7 @@ func (a *anyConnectAuthentication) advanceSSOBrowser(
 func (a *anyConnectAuthentication) submitAuthenticationForm(ctx context.Context) (obtainedSession, *authenticationRequest, error) {
 	for i := range a.currentForm.Fields {
 		field := &a.currentForm.Fields[i]
-		if field.Kind == anyConnectFormFieldPassword && field.StableCredential {
+		if !field.Ignore && field.Kind == anyConnectFormFieldPassword && field.StableCredential {
 			a.primaryPasswordSubmitted = true
 			break
 		}
@@ -505,19 +519,11 @@ func (a *anyConnectAuthentication) processAuthenticationForm(
 	}
 	groupField := findAnyConnectAuthGroup(&a.currentForm)
 	if groupField != nil {
-		a.serverGroupSelection = groupField.Value
 		stableGroup := a.stableCredential(authCacheAuthGroup)
 		if stableGroup != "" {
 			choice, found := findAnyConnectChoice(groupField, stableGroup)
 			if found {
-				a.selectedGroup = choice.Name
-				groupField.Value = choice.Name
-				applyAnyConnectAuthGroup(&a.currentForm, choice.Name)
-				if a.stageUsesXMLPost() && choice.Name != a.serverGroupSelection {
-					a.stage = anyConnectAuthenticationInitialXML
-					return a.advanceInitialXML(ctx)
-				}
-				return a.yieldAuthenticationRequest()
+				return a.selectAuthGroup(ctx, choice)
 			}
 		}
 		request := buildAnyConnectAuthGroupRequest(a.currentForm, *groupField)
@@ -558,6 +564,18 @@ func (a *anyConnectAuthentication) advanceClientCertificateFailure(ctx context.C
 }
 
 func (a *anyConnectAuthentication) yieldAuthenticationRequest() (obtainedSession, *authenticationRequest, error) {
+	// Upstream process_auth_form_cb cancels on the third consecutive form with nothing to fill besides the authgroup and hidden fields.
+	emptyForm := common.All(a.currentForm.Fields, func(field anyConnectFormField) bool {
+		return field.Ignore || field.Kind == anyConnectFormFieldHidden || field.Kind == anyConnectFormFieldSelect && field.Name == "group_list"
+	})
+	if emptyForm {
+		a.emptyForms++
+		if a.emptyForms == 3 {
+			return nil, nil, E.Errors(ErrAuthenticationFailed, E.New("gateway returned 3 consecutive authentication forms without credential fields"))
+		}
+	} else {
+		a.emptyForms = 0
+	}
 	request, err := a.buildAuthenticationRequest()
 	if err != nil {
 		return nil, nil, err
@@ -638,8 +656,11 @@ func (a *anyConnectAuthentication) buildAuthenticationRequest() (*authentication
 		default:
 			return nil, E.Extend(ErrProtocolNotSupported, "unsupported AnyConnect authentication field kind: ", field.Kind)
 		}
-		if a.currentForm.Error != "" && requestField.CacheKey == authCachePassword {
+		if (a.currentForm.Error != "" || a.primaryPasswordSubmitted) && requestField.CacheKey == authCachePassword {
 			request.ClearCacheKeys = []string{authCachePassword}
+			if request.Error == "" {
+				request.Error = "gateway rejected the primary credentials"
+			}
 		}
 		request.Fields = append(request.Fields, requestField)
 	}
