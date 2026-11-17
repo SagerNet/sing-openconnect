@@ -80,7 +80,7 @@ func parseFortinetAuthenticationResult(content []byte) (int, bool, error) {
 func parseFortinetTokenInfo(content []byte, username string) (*fortinetAuthenticationForm, error) {
 	trimmed := strings.TrimSpace(string(content))
 	if !strings.HasPrefix(trimmed, "ret=") {
-		return nil, E.New("tokeninfo response does not begin with ret")
+		return nil, nil
 	}
 	segments := strings.Split(trimmed, ",")
 	if len(segments) > fortinetMaximumTokenInfoFields {
@@ -109,7 +109,7 @@ func parseFortinetTokenInfo(content []byte, username string) (*fortinetAuthentic
 	}
 	tokenInfo, loaded := values["tokeninfo"]
 	if !loaded {
-		return nil, E.New("challenge omitted tokeninfo")
+		return nil, nil
 	}
 	formID := "_challenge"
 	form := &fortinetAuthenticationForm{

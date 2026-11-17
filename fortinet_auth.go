@@ -318,11 +318,11 @@ func (a *fortinetAuthentication) processAuthenticationResponse(
 	previousInitial bool,
 ) (obtainedSession, *authenticationRequest, error) {
 	a.rememberHTTPResponse(httpResponse)
+	var rejectedCacheKeys []string
+	if previousInitial {
+		rejectedCacheKeys = []string{authCachePassword}
+	}
 	if httpResponse.statusCode == http.StatusOK {
-		var rejectedCacheKeys []string
-		if previousInitial {
-			rejectedCacheKeys = []string{authCachePassword}
-		}
 		authenticationResultErr := fortinetAuthenticationResultError(httpResponse.body, rejectedCacheKeys...)
 		if authenticationResultErr != nil {
 			return nil, nil, authenticationResultErr
@@ -363,28 +363,15 @@ func (a *fortinetAuthentication) processAuthenticationResponse(
 				return a.beginSAMLAuthentication(location)
 			}
 		}
-		if isFortinetHTMLResponse(httpResponse) {
-			a.access.Lock()
-			currentURL := cloneFortinetURL(a.currentURL)
-			realm := a.realm
-			a.access.Unlock()
-			if currentURL == nil {
-				return nil, nil, markTerminal(E.New("authentication endpoint is empty"))
-			}
-			samlURL := newFortinetEndpointURL(currentURL, "/remote/saml/start")
-			if realm != "" {
-				query := make(url.Values)
-				query.Set("realm", realm)
-				samlURL.RawQuery = query.Encode()
-			}
-			return a.beginSAMLAuthentication(samlURL)
-		}
 		a.access.Lock()
 		username := a.username
 		a.access.Unlock()
 		form, parseErr := parseFortinetTokenInfo(httpResponse.body, username)
 		if parseErr != nil {
 			return nil, nil, markTerminal(parseErr)
+		}
+		if form == nil {
+			return nil, nil, newRetryableAuthenticationError(E.New("logincheck returned neither SVPNCOOKIE nor a challenge"), rejectedCacheKeys...)
 		}
 		a.access.Lock()
 		a.currentForm = form
@@ -563,18 +550,6 @@ func (a *fortinetAuthentication) completeSAMLAuthentication(
 		return nil, nil, markTerminal(E.New("SAML auth_id response omitted SVPNCOOKIE"))
 	}
 	return a.completeAuthenticatedResponse(ctx, httpResponse, state)
-}
-
-func isFortinetHTMLResponse(response fortinetHTTPResponse) bool {
-	contentType := strings.ToLower(response.header.Get("Content-Type"))
-	if strings.HasPrefix(contentType, "text/html") {
-		return true
-	}
-	trimmed := bytes.TrimSpace(response.body)
-	lowerContent := bytes.ToLower(trimmed)
-	return bytes.HasPrefix(lowerContent, []byte("<!doctype html")) ||
-		bytes.HasPrefix(lowerContent, []byte("<html")) ||
-		bytes.Contains(lowerContent, []byte("/remote/saml/"))
 }
 
 func parseFortinetSAMLCallback(callback string) (string, error) {
