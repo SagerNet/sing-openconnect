@@ -783,7 +783,11 @@ func parsePositiveCSTPInteger(value string, name string) (int, error) {
 	return parsed, nil
 }
 
+// Cisco ASA sends "disabled" for a timer that is turned off, upstream parses it as zero with atol.
 func parseCSTPDuration(value string, name string) (time.Duration, error) {
+	if strings.EqualFold(strings.TrimSpace(value), "disabled") {
+		return 0, nil
+	}
 	seconds, err := parsePositiveCSTPInteger(value, name)
 	if err != nil {
 		return 0, err
