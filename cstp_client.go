@@ -92,15 +92,12 @@ func connectCSTP(ctx context.Context, client *Client, session *anyConnectSession
 		return nil, E.Cause(err, "connect AnyConnect CSTP TCP transport")
 	}
 	if dynamicDNS {
-		remoteHost, _, splitErr := net.SplitHostPort(rawConnection.RemoteAddr().String())
-		if splitErr == nil {
-			remoteAddress, parseErr := netip.ParseAddr(remoteHost)
-			if parseErr == nil {
-				sessionSnapshot.AuthenticatedAddress = remoteAddress
-				session.access.Lock()
-				session.AuthenticatedAddress = remoteAddress
-				session.access.Unlock()
-			}
+		remoteAddress := client.connectionPeerAddress(rawConnection)
+		if remoteAddress.IsValid() {
+			sessionSnapshot.AuthenticatedAddress = remoteAddress
+			session.access.Lock()
+			session.AuthenticatedAddress = remoteAddress
+			session.access.Unlock()
 		}
 	}
 	setupComplete := false
@@ -138,7 +135,7 @@ func connectCSTP(ctx context.Context, client *Client, session *anyConnectSession
 			return nil, E.Cause(err, "generate AnyConnect legacy DTLS master secret")
 		}
 	}
-	request, err := buildCSTPConnectRequest(client, sessionSnapshot, masterSecret, rawConnection.RemoteAddr())
+	request, err := buildCSTPConnectRequest(client, sessionSnapshot, masterSecret, client.connectionPeerAddress(rawConnection))
 	if err != nil {
 		return nil, markTerminal(err)
 	}
@@ -175,7 +172,7 @@ func connectCSTP(ctx context.Context, client *Client, session *anyConnectSession
 		}
 		return nil, markTerminal(E.Errors(ErrProtocolNotSupported, rejection))
 	}
-	connectedAddress := parseAnyConnectRemoteAddress(rawConnection.RemoteAddr())
+	connectedAddress := client.connectionPeerAddress(rawConnection)
 	if connectedAddress.IsValid() {
 		sessionSnapshot.AuthenticatedAddress = connectedAddress
 	}
@@ -286,7 +283,7 @@ func buildCSTPConnectRequest(
 	client *Client,
 	session *anyConnectSessionState,
 	masterSecret []byte,
-	remoteAddress net.Addr,
+	remoteAddress netip.Addr,
 ) ([]byte, error) {
 	serverURL := session.ServerURL
 	userAgent := anyConnectUserAgent(client)
@@ -381,7 +378,7 @@ func buildCSTPConnectRequest(
 	return []byte(request.String()), nil
 }
 
-func calculateCSTPRequestMTU(baseMTU uint32, tunnelMTU uint32, remoteAddress net.Addr) (uint32, uint32) {
+func calculateCSTPRequestMTU(baseMTU uint32, tunnelMTU uint32, remoteAddress netip.Addr) (uint32, uint32) {
 	if baseMTU == 0 {
 		baseMTU = cstpDefaultBaseMTU
 	}
@@ -392,14 +389,8 @@ func calculateCSTPRequestMTU(baseMTU uint32, tunnelMTU uint32, remoteAddress net
 		return baseMTU, tunnelMTU
 	}
 	ipHeaderSize := uint32(20)
-	if remoteAddress != nil {
-		host, _, err := net.SplitHostPort(remoteAddress.String())
-		if err == nil {
-			address, parseErr := netip.ParseAddr(strings.Trim(host, "[]"))
-			if parseErr == nil && address.Is6() {
-				ipHeaderSize = 40
-			}
-		}
+	if !remoteAddress.Is4() {
+		ipHeaderSize = 40
 	}
 	overhead := ipHeaderSize + 8 + cstpDTLSOverhead
 	if baseMTU <= overhead {

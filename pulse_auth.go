@@ -131,7 +131,7 @@ func (f *pulseFrontend) ConnectTunnel(ctx context.Context, obtained obtainedSess
 		return nil, E.Extend(ErrProtocolNotSupported, "invalid Pulse obtained session")
 	}
 	snapshot := state.snapshot()
-	if snapshot.serverURL == nil || !snapshot.acceptedAddress.IsValid() || snapshot.jar == nil || len(snapshot.cookie) == 0 {
+	if snapshot.serverURL == nil || snapshot.jar == nil || len(snapshot.cookie) == 0 {
 		clear(snapshot.cookie)
 		return nil, ErrSessionRejected
 	}
@@ -435,12 +435,9 @@ func (a *pulseAuthentication) openConnection(ctx context.Context) (*pulseIFTConn
 	if err != nil {
 		return nil, netip.Addr{}, E.Cause(err, "handshake Pulse TLS endpoint")
 	}
-	acceptedAddress := parseAnyConnectRemoteAddress(tlsConnection.RemoteAddr())
-	if a.acceptedAddress.IsValid() {
-		acceptedAddress = a.acceptedAddress
-	}
+	acceptedAddress := a.acceptedAddress
 	if !acceptedAddress.IsValid() {
-		return nil, netip.Addr{}, markTerminal(E.New("TLS endpoint did not expose an accepted IP address"))
+		acceptedAddress = a.frontend.client.connectionPeerAddress(tlsConnection)
 	}
 	reader := bufio.NewReader(tlsConnection)
 	err = a.writeUpgradeRequest(tlsConnection)
@@ -519,7 +516,7 @@ func (a *pulseAuthentication) buildClientInformation() []byte {
 	content.WriteString("clientHostName=")
 	content.WriteString(a.frontend.localHostname)
 	if a.connection != nil {
-		localAddress := parseAnyConnectRemoteAddress(a.connection.LocalAddr())
+		localAddress := a.frontend.client.connectionLocalAddress(a.connection)
 		if localAddress.IsValid() {
 			content.WriteString(" clientIp=")
 			content.WriteString(localAddress.String())
@@ -1023,7 +1020,7 @@ func (s *pulseSessionState) Close() error {
 		gracefulBye := s.gracefulBye
 		s.access.Unlock()
 		snapshot := s.snapshot()
-		if !snapshot.acceptedAddress.IsValid() || snapshot.serverURL == nil || snapshot.jar == nil || len(snapshot.cookie) == 0 {
+		if snapshot.serverURL == nil || snapshot.jar == nil || len(snapshot.cookie) == 0 {
 			clear(snapshot.cookie)
 		} else if !gracefulBye {
 			logoutContext, cancelLogout := context.WithTimeout(context.Background(), pulseLogoutTimeout)
@@ -1065,7 +1062,7 @@ func (f *pulseFrontend) logout(ctx context.Context, snapshot pulseSessionSnapsho
 		if parseErr != nil || uint16(parsedPort) != port || !strings.EqualFold(hostname, expectedHostname) {
 			return nil, E.New("logout attempted to dial outside the accepted endpoint")
 		}
-		return f.client.options.Dialer.DialContext(dialContext, network, M.ParseSocksaddrHostPort(snapshot.acceptedAddress.String(), port))
+		return f.client.options.Dialer.DialContext(dialContext, network, M.ParseSocksaddrHostPort(peerDestinationHost(snapshot.acceptedAddress, expectedHostname), port))
 	}
 	logoutClient := &http.Client{
 		Transport: f.client.wrapHTTPTransport(transport),

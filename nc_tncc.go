@@ -134,8 +134,8 @@ func newNCBuiltInTNCCRunner(
 	acceptedAddress netip.Addr,
 	jar http.CookieJar,
 ) (*ncBuiltInTNCCRunner, error) {
-	if serverURL == nil || !acceptedAddress.IsValid() || jar == nil {
-		return nil, markTerminal(E.New("built-in TNCC requires an accepted HTTPS endpoint and cookie jar"))
+	if serverURL == nil || jar == nil {
+		return nil, markTerminal(E.New("built-in TNCC requires a server URL and cookie jar"))
 	}
 	options := frontend.client.options.TNCC
 	userAgent := ncTNCCDefaultUserAgent

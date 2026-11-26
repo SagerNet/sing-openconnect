@@ -111,7 +111,7 @@ func (f *gpFrontend) fetchTunnelConfiguration(ctx context.Context, snapshot gpSe
 	peer := &pinnedHTTPPeer{address: snapshot.authenticatedAddress}
 	request = request.WithContext(httptrace.WithClientTrace(request.Context(), &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
-			peer.record(info.Conn)
+			peer.record(f.client.connectionPeerAddress(info.Conn))
 		},
 	}))
 	request.Header.Set("Accept", "*/*")
@@ -155,11 +155,7 @@ func (f *gpFrontend) fetchTunnelConfiguration(ctx context.Context, snapshot gpSe
 	if string(responseBody) == "errors getting SSL/VPN config" {
 		return nil, E.Errors(ErrSessionRejected, E.New("gateway rejected the configuration cookie"))
 	}
-	authenticatedAddress := peer.address
-	if !authenticatedAddress.IsValid() {
-		return nil, markTerminal(E.New("configuration endpoint did not expose an authenticated IP address"))
-	}
-	configuration, err := parseGPTunnelConfiguration(ctx, f.client, responseBody, authenticatedAddress)
+	configuration, err := parseGPTunnelConfiguration(ctx, f.client, responseBody, peer.load())
 	if err != nil {
 		return nil, err
 	}
@@ -422,13 +418,13 @@ func parseGPTunnelConfiguration(
 		result.Configuration.AuthenticationExpiration = time.Now().Add(lifetime)
 	}
 	if rawESP != nil {
-		if !client.options.NoUDP {
+		if !client.options.NoUDP && authenticatedAddress.IsValid() {
 			result.ESP = buildGPESPConfiguration(client, ctx, rawESP, authenticatedAddress, assignedIPv4, assignedIPv6, magicIPv4, magicIPv6)
 		}
 		rawESP.clear()
 	}
 	if configuredMTU == 0 {
-		result.Configuration.MTU = uint32(calculateGPTunnelMTU(client.options.MTU, client.options.BaseMTU, authenticatedAddress.Is6(), result.ESP))
+		result.Configuration.MTU = uint32(calculateGPTunnelMTU(client.options.MTU, client.options.BaseMTU, !authenticatedAddress.Is4(), result.ESP))
 	} else {
 		minimumMTU := uint64(576)
 		if assignedIPv6.IsValid() {
@@ -720,10 +716,6 @@ func buildGPESPConfiguration(
 	})
 	if err != nil {
 		return fallback(err)
-	}
-	if !authenticatedAddress.IsValid() {
-		keys.destroy()
-		return fallback("authenticated gateway address is missing")
 	}
 	return &gpESPConfiguration{
 		Remote: M.ParseSocksaddrHostPort(authenticatedAddress.Unmap().String(), raw.port),

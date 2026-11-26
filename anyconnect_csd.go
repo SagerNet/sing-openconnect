@@ -111,7 +111,7 @@ func (a *anyConnectAuthentication) runHostScan(ctx context.Context) error {
 			return nil, dialErr
 		}
 		if pinDestination && !pinnedAddress.IsValid() {
-			remoteAddress := parseAnyConnectRemoteAddress(conn.RemoteAddr())
+			remoteAddress := a.frontend.client.connectionPeerAddress(conn)
 			if remoteAddress.IsValid() {
 				hostScanAddressAccess.Lock()
 				if !hostScanAddress.IsValid() {
@@ -460,7 +460,7 @@ func (a *anyConnectAuthentication) probeAnyConnectHostScanCertificate(ctx contex
 		return nil, markTerminal(E.Errors(E.New("CSD wrapper TLS peer sent no certificate"), closeErr))
 	}
 	certificate := connectionState.PeerCertificates[0]
-	authenticatedAddress := parseAnyConnectRemoteAddress(tlsConn.RemoteAddr())
+	authenticatedAddress := a.frontend.client.connectionPeerAddress(tlsConn)
 	if authenticatedAddress.IsValid() {
 		a.authenticatedAddress = authenticatedAddress
 	}

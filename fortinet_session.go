@@ -105,9 +105,15 @@ func (s *fortinetSession) preparePPP() (pppSessionSetup, error) {
 	if carrierErr != nil {
 		return pppSessionSetup{}, carrierErr
 	}
-	if s.snapshot.connectedOnce && configuration.checkSourceIP && carrier.localSourceIP != s.snapshot.initialSourceAddress {
+	if s.snapshot.connectedOnce && configuration.checkSourceIP && carrier.localSourceIP.IsValid() && s.snapshot.initialSourceAddress.IsValid() && carrier.localSourceIP != s.snapshot.initialSourceAddress {
 		_ = carrier.connection.Close()
 		return pppSessionSetup{}, ErrSessionRejected
+	}
+	tunnelConfiguration := configuration.configuration
+	if !tunnelConfiguration.RemoteAddress.IsValid() {
+		s.state.access.RLock()
+		tunnelConfiguration.RemoteAddress = s.state.acceptedAddress
+		s.state.access.RUnlock()
 	}
 	proposedIPv4 := configuration.proposedIPv4
 	proposedIPv6 := configuration.proposedIPv6
@@ -136,7 +142,7 @@ func (s *fortinetSession) preparePPP() (pppSessionSetup, error) {
 				s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
 			},
 		},
-		configuration:   configuration.configuration,
+		configuration:   tunnelConfiguration,
 		usingDTLS:       usingDTLS,
 		dtlsEnabled:     dtlsEnabled,
 		checkSourceIP:   configuration.checkSourceIP,
@@ -165,13 +171,25 @@ func validateFortinetReconnect(
 	return nil
 }
 
+func (s *fortinetSession) recordAcceptedAddress(connection net.Conn) {
+	acceptedAddress := s.client.connectionPeerAddress(connection)
+	if !acceptedAddress.IsValid() {
+		return
+	}
+	s.state.access.Lock()
+	if !s.state.acceptedAddress.IsValid() {
+		s.state.acceptedAddress = acceptedAddress
+	}
+	s.state.access.Unlock()
+}
+
 func (s *fortinetSession) connectPPPTLS() (pppSessionCarrier, error) {
 	configuration := s.configuration
 	serverPort, portErr := fortinetURLPort(s.snapshot.serverURL)
 	if portErr != nil {
 		return pppSessionCarrier{}, portErr
 	}
-	destination := M.ParseSocksaddrHostPort(s.snapshot.acceptedAddress.String(), serverPort)
+	destination := M.ParseSocksaddrHostPort(peerDestinationHost(s.snapshot.acceptedAddress, s.snapshot.serverURL.Hostname()), serverPort)
 	dialer := s.client.options.Dialer
 	rawConnection, dialErr := dialer.DialContext(s.ctx, N.NetworkTCP, destination)
 	if dialErr != nil {
@@ -213,10 +231,8 @@ func (s *fortinetSession) connectPPPTLS() (pppSessionCarrier, error) {
 	if clearDeadlineErr != nil {
 		return pppSessionCarrier{}, E.Cause(clearDeadlineErr, "clear Fortinet TLS connection deadline")
 	}
-	localSourceIP := parseFortinetRemoteAddress(tlsConnection.LocalAddr())
-	if !localSourceIP.IsValid() {
-		return pppSessionCarrier{}, E.New("TLS transport has no local source IP")
-	}
+	localSourceIP := s.client.connectionLocalAddress(tlsConnection)
+	s.recordAcceptedAddress(rawConnection)
 	setupComplete = true
 	return pppSessionCarrier{
 		connection: &fortinetTLSConn{
@@ -239,7 +255,7 @@ func (s *fortinetSession) connectPPPDTLS(ctx context.Context) (pppSessionCarrier
 		tlsConfiguration.ServerName = s.snapshot.serverURL.Hostname()
 	}
 	connection, connectErr := connectCertificateDTLS(ctx, certificateDTLSNegotiation{
-		Address:    net.JoinHostPort(s.snapshot.acceptedAddress.String(), strconv.Itoa(int(serverPort))),
+		Address:    net.JoinHostPort(peerDestinationHost(s.snapshot.acceptedAddress, s.snapshot.serverURL.Hostname()), strconv.Itoa(int(serverPort))),
 		ServerName: s.snapshot.serverURL.Hostname(),
 		TLSConfig:  tlsConfiguration,
 		Dialer:     s.client.options.Dialer,
@@ -266,10 +282,8 @@ func (s *fortinetSession) connectPPPDTLS(ctx context.Context) (pppSessionCarrier
 		return pppSessionCarrier{}, E.New("DTLS data MTU is too small for PPP")
 	}
 	tunnelMTU := min(int(configuration.configuration.MTU), dataMTU)
-	localSourceIP := parseFortinetRemoteAddress(connection.LocalAddr())
-	if !localSourceIP.IsValid() {
-		return pppSessionCarrier{}, E.New("DTLS transport has no local source IP")
-	}
+	localSourceIP := s.client.connectionLocalAddress(connection)
+	s.recordAcceptedAddress(connection)
 	setupComplete = true
 	return pppSessionCarrier{
 		connection:    applicationConnection,
@@ -348,7 +362,7 @@ func validFortinetPPPDatagram(content []byte) bool {
 }
 
 func fortinetDTLSRecordMTU(acceptedAddress netip.Addr) int {
-	if acceptedAddress.Is6() {
+	if !acceptedAddress.Is4() {
 		return 1232
 	}
 	return 1400

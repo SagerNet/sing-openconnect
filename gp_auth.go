@@ -785,7 +785,7 @@ func (a *gpAuthentication) doAuthenticationRequest(
 		var authenticatedAddress netip.Addr
 		trace := &httptrace.ClientTrace{
 			GotConn: func(info httptrace.GotConnInfo) {
-				authenticatedAddress = parseGPRemoteAddress(info.Conn.RemoteAddr())
+				authenticatedAddress = a.frontend.client.connectionPeerAddress(info.Conn)
 			},
 		}
 		request = request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
@@ -879,7 +879,7 @@ func (s *gpSessionState) snapshot() gpSessionSnapshot {
 func (s *gpSessionState) Close() error {
 	s.closeOnce.Do(func() {
 		snapshot := s.snapshot()
-		if snapshot.serverURL != nil && snapshot.opaqueQuery != "" && snapshot.authenticatedAddress.IsValid() {
+		if snapshot.serverURL != nil && snapshot.opaqueQuery != "" {
 			ctx, cancel := context.WithTimeout(context.Background(), gpLogoutTimeout)
 			s.closeErr = s.frontend.logout(ctx, snapshot)
 			cancel()
@@ -893,9 +893,6 @@ func (s *gpSessionState) Close() error {
 
 // Upstream gpst_bye sends the complete authenticated query because logout validation includes otherwise redundant portal, user, computer, and domain values.
 func (f *gpFrontend) logout(ctx context.Context, snapshot gpSessionSnapshot) error {
-	if !snapshot.authenticatedAddress.IsValid() {
-		return E.New("logout requires the authenticated gateway address")
-	}
 	logoutURL := cloneGPURL(snapshot.serverURL)
 	logoutURL.Path = "/ssl-vpn/logout.esp"
 	logoutURL.RawPath = ""
@@ -917,7 +914,7 @@ func (f *gpFrontend) logout(ctx context.Context, snapshot gpSessionSnapshot) err
 		if parseErr != nil || parsedPort == 0 {
 			return nil, E.New("logout attempted to dial an invalid gateway port")
 		}
-		destination := M.ParseSocksaddrHostPort(snapshot.authenticatedAddress.String(), uint16(parsedPort))
+		destination := M.ParseSocksaddrHostPort(peerDestinationHost(snapshot.authenticatedAddress, gatewayHostname), uint16(parsedPort))
 		return f.client.options.Dialer.DialContext(dialContext, network, destination)
 	}
 	logoutClient := &http.Client{
@@ -1053,21 +1050,6 @@ func gpRedirectStatus(statusCode int) bool {
 	default:
 		return false
 	}
-}
-
-func parseGPRemoteAddress(address net.Addr) netip.Addr {
-	if address == nil {
-		return netip.Addr{}
-	}
-	host, _, err := net.SplitHostPort(address.String())
-	if err != nil {
-		return netip.Addr{}
-	}
-	parsed, err := netip.ParseAddr(host)
-	if err != nil {
-		return netip.Addr{}
-	}
-	return parsed.Unmap()
 }
 
 func gpHTTPStatusError(statusCode int, message string) error {

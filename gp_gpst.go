@@ -62,8 +62,8 @@ func newGPSTChannel(ctx context.Context, config gpstChannelConfig) (*gpstChannel
 	if config.Client == nil || config.Client.tlsConfig == nil {
 		return nil, E.New("GPST channel requires an initialized client")
 	}
-	if config.Snapshot.serverURL == nil || config.Snapshot.serverURL.Hostname() == "" || !config.Snapshot.authenticatedAddress.IsValid() {
-		return nil, E.New("GPST channel requires an authenticated gateway endpoint")
+	if config.Snapshot.serverURL == nil || config.Snapshot.serverURL.Hostname() == "" {
+		return nil, E.New("GPST channel requires a gateway URL")
 	}
 	if config.TunnelPath == "" || !strings.HasPrefix(config.TunnelPath, "/") {
 		return nil, E.New("GPST channel requires an absolute tunnel path")
@@ -241,7 +241,7 @@ func (c *gpstChannel) connect() (*tls.Conn, error) {
 		return nil, markTerminal(E.New("gateway has an invalid GPST port"))
 	}
 	dialer := c.config.Client.options.Dialer
-	destination := M.ParseSocksaddrHostPort(c.config.Snapshot.authenticatedAddress.Unmap().String(), uint16(gatewayPort))
+	destination := M.ParseSocksaddrHostPort(peerDestinationHost(c.config.Snapshot.authenticatedAddress.Unmap(), gatewayHostname), uint16(gatewayPort))
 	rawConnection, err := dialer.DialContext(c.ctx, N.NetworkTCP, destination)
 	if err != nil {
 		return nil, E.Cause(err, "connect GPST TCP transport")

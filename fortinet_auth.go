@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptrace"
@@ -680,7 +679,7 @@ func (a *fortinetAuthentication) doAuthenticationRequest(
 	var acceptedAddress netip.Addr
 	trace := &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
-			acceptedAddress = parseFortinetRemoteAddress(info.Conn.RemoteAddr())
+			acceptedAddress = a.frontend.client.connectionPeerAddress(info.Conn)
 		},
 	}
 	request = request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
@@ -762,9 +761,6 @@ func (a *fortinetAuthentication) sessionFromCookies(requestURL *url.URL) (*forti
 	}
 	if svpnCookie == "" {
 		return nil, nil
-	}
-	if !acceptedAddress.IsValid() {
-		return nil, markTerminal(E.New("authenticated endpoint has no accepted peer address"))
 	}
 	return &fortinetSessionState{
 		frontend:        a.frontend,
@@ -928,29 +924,6 @@ func fortinetURLPort(serverURL *url.URL) (uint16, error) {
 	return uint16(port), nil
 }
 
-func parseFortinetRemoteAddress(address net.Addr) netip.Addr {
-	if address == nil {
-		return netip.Addr{}
-	}
-	switch typedAddress := address.(type) {
-	case *net.TCPAddr:
-		parsed, _ := netip.AddrFromSlice(typedAddress.IP)
-		return parsed.Unmap()
-	case *net.UDPAddr:
-		parsed, _ := netip.AddrFromSlice(typedAddress.IP)
-		return parsed.Unmap()
-	}
-	host, _, splitErr := net.SplitHostPort(address.String())
-	if splitErr != nil {
-		return netip.Addr{}
-	}
-	parsed, parseErr := netip.ParseAddr(host)
-	if parseErr != nil {
-		return netip.Addr{}
-	}
-	return parsed.Unmap()
-}
-
 func (s *fortinetSessionState) snapshot() fortinetSessionSnapshot {
 	s.access.RLock()
 	defer s.access.RUnlock()
@@ -999,7 +972,7 @@ func (s *fortinetSessionState) Close() error {
 			s.closeErr = activeSession.Close()
 		}
 		snapshot := s.snapshot()
-		if snapshot.serverURL != nil && snapshot.acceptedAddress.IsValid() && snapshot.jar != nil && snapshot.svpnCookie != "" {
+		if snapshot.serverURL != nil && snapshot.jar != nil && snapshot.svpnCookie != "" {
 			logoutContext, cancelLogout := context.WithTimeout(context.Background(), fortinetLogoutTimeout)
 			logoutErr := s.frontend.logout(logoutContext, snapshot)
 			cancelLogout()

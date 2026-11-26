@@ -121,6 +121,7 @@ type ClientOptions struct {
 	TLSConfig                      ClientTLSOptions
 	FormEntries                    []FormEntry
 	Dialer                         N.Dialer
+	ProxiedDialer                  bool
 	Logger                         logger.ContextLogger
 	OnTunnelConfiguration          func(event TunnelConfigurationEvent) error
 }

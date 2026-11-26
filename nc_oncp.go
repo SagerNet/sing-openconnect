@@ -103,11 +103,7 @@ func openNCONCPConnection(
 		return nil, nil, E.Cause(err, "connect Network Connect oNCP TCP transport")
 	}
 	if !snapshot.acceptedAddress.IsValid() {
-		snapshot.acceptedAddress = parseAnyConnectRemoteAddress(rawConnection.RemoteAddr())
-	}
-	if !snapshot.acceptedAddress.IsValid() {
-		_ = rawConnection.Close()
-		return nil, nil, markTerminal(E.New("oNCP endpoint did not expose an accepted IP address"))
+		snapshot.acceptedAddress = client.connectionPeerAddress(rawConnection)
 	}
 	setupComplete := false
 	defer func() {

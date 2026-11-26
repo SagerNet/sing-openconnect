@@ -94,7 +94,7 @@ func readPulseConfiguration(
 				return nil, markTerminal(E.Cause(err, "parse Pulse main configuration"))
 			}
 		case 0x21202400:
-			if client.options.NoUDP {
+			if client.options.NoUDP || !acceptedAddress.IsValid() {
 				continue
 			}
 			newESP, responsePayload, parseErr := parsePulseESPConfiguration(frame.payload, accumulator, acceptedAddress)

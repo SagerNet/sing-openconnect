@@ -219,7 +219,7 @@ func (s *ncSession) controlLoop() {
 }
 
 func (s *ncSession) startInitialESP() *espChannel {
-	if s.client.options.NoUDP || s.snapshot.acceptedAddress.Is6() {
+	if s.client.options.NoUDP || !s.snapshot.acceptedAddress.Is4() {
 		return nil
 	}
 	s.access.RLock()

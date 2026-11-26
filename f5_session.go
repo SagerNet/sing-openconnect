@@ -89,6 +89,12 @@ func (s *f5Session) preparePPP() (pppSessionSetup, error) {
 	if carrierErr != nil {
 		return pppSessionSetup{}, carrierErr
 	}
+	tunnelConfiguration := configuration.configuration
+	if !tunnelConfiguration.RemoteAddress.IsValid() {
+		s.state.access.RLock()
+		tunnelConfiguration.RemoteAddress = s.state.acceptedAddress
+		s.state.access.RUnlock()
+	}
 	encapsulation := pppEncapsulationF5
 	if configuration.hdlc {
 		encapsulation = pppEncapsulationF5HDLC
@@ -124,10 +130,22 @@ func (s *f5Session) preparePPP() (pppSessionSetup, error) {
 				s.client.pushIncomingDataPacketContext(s.ctx, packetBuffer)
 			},
 		},
-		configuration: configuration.configuration,
+		configuration: tunnelConfiguration,
 		usingDTLS:     usingDTLS,
 		dtlsEnabled:   dtlsEnabled,
 	}, nil
+}
+
+func (s *f5Session) recordAcceptedAddress(connection net.Conn) {
+	acceptedAddress := s.client.connectionPeerAddress(connection)
+	if !acceptedAddress.IsValid() {
+		return
+	}
+	s.state.access.Lock()
+	if !s.state.acceptedAddress.IsValid() {
+		s.state.acceptedAddress = acceptedAddress
+	}
+	s.state.access.Unlock()
 }
 
 func (s *f5Session) connectPPPTLS() (pppSessionCarrier, error) {
@@ -136,7 +154,7 @@ func (s *f5Session) connectPPPTLS() (pppSessionCarrier, error) {
 	if portErr != nil {
 		return pppSessionCarrier{}, portErr
 	}
-	destination := M.ParseSocksaddrHostPort(s.snapshot.acceptedAddress.String(), serverPort)
+	destination := M.ParseSocksaddrHostPort(peerDestinationHost(s.snapshot.acceptedAddress, s.snapshot.serverURL.Hostname()), serverPort)
 	dialer := s.client.options.Dialer
 	rawConnection, dialErr := dialer.DialContext(s.ctx, N.NetworkTCP, destination)
 	if dialErr != nil {
@@ -193,6 +211,7 @@ func (s *f5Session) connectPPPTLS() (pppSessionCarrier, error) {
 	if clearDeadlineErr != nil {
 		return pppSessionCarrier{}, E.Cause(clearDeadlineErr, "clear F5 TLS connection deadline")
 	}
+	s.recordAcceptedAddress(rawConnection)
 	setupComplete = true
 	return pppSessionCarrier{
 		connection:   &f5BufferedConn{Conn: tlsConnection, reader: reader},
@@ -209,7 +228,7 @@ func (s *f5Session) connectPPPDTLS(ctx context.Context) (pppSessionCarrier, erro
 		tlsConfiguration.ServerName = s.snapshot.serverURL.Hostname()
 	}
 	connection, connectErr := connectCertificateDTLS(ctx, certificateDTLSNegotiation{
-		Address:           net.JoinHostPort(s.snapshot.acceptedAddress.String(), strconv.Itoa(int(configuration.dtlsPort))),
+		Address:           net.JoinHostPort(peerDestinationHost(s.snapshot.acceptedAddress, s.snapshot.serverURL.Hostname()), strconv.Itoa(int(configuration.dtlsPort))),
 		ServerName:        s.snapshot.serverURL.Hostname(),
 		TLSConfig:         tlsConfiguration,
 		Dialer:            s.client.options.Dialer,
@@ -238,6 +257,7 @@ func (s *f5Session) connectPPPDTLS(ctx context.Context) (pppSessionCarrier, erro
 		return pppSessionCarrier{}, E.New("DTLS data MTU is too small for PPP")
 	}
 	tunnelMTU := min(int(configuration.configuration.MTU), dataMTU)
+	s.recordAcceptedAddress(connection)
 	setupComplete = true
 	return pppSessionCarrier{
 		connection:   connection,
@@ -309,7 +329,7 @@ func probeF5DTLS(
 }
 
 func f5DTLSRecordMTU(acceptedAddress netip.Addr) int {
-	if acceptedAddress.Is6() {
+	if !acceptedAddress.Is4() {
 		return 1232
 	}
 	return 1400

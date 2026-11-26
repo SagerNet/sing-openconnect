@@ -146,14 +146,11 @@ func (f *fortinetFrontend) fetchTunnelConfiguration(
 	if f.client.options.DPDInterval > 0 {
 		configuration.echoInterval = f.client.options.DPDInterval
 	}
-	acceptedAddress := peer.address
-	if !acceptedAddress.IsValid() {
-		return nil, "", markTerminal(E.New("configuration endpoint did not expose an accepted IP address"))
-	}
+	acceptedAddress := peer.load()
 	configuration.configuration.MTU = calculatePPPTunnelMTU(
 		f.client.options.MTU,
 		f.client.options.BaseMTU,
-		acceptedAddress.Is6(),
+		!acceptedAddress.Is4(),
 		pppEncapsulationFortinet,
 	)
 	ipv6Disabled := f.client.options.IPv6Disabled || configuration.configuration.MTU < minimumIPv6MTU

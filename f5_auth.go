@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptrace"
@@ -347,7 +346,7 @@ func (a *f5Authentication) doAuthenticationRequest(
 	var acceptedAddress netip.Addr
 	trace := &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
-			acceptedAddress = parseF5RemoteAddress(info.Conn.RemoteAddr())
+			acceptedAddress = a.frontend.client.connectionPeerAddress(info.Conn)
 		},
 	}
 	request = request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
@@ -513,9 +512,6 @@ func (a *f5Authentication) sessionFromCookies(requestURL *url.URL) (*f5SessionSt
 	if mrhSession == "" || f5ST == "" {
 		return nil, nil
 	}
-	if !acceptedAddress.IsValid() {
-		return nil, markTerminal(E.New("authenticated endpoint has no accepted peer address"))
-	}
 	return &f5SessionState{
 		frontend:                 a.frontend,
 		serverURL:                cloneF5URL(requestURL),
@@ -653,29 +649,6 @@ func f5URLPort(serverURL *url.URL) (uint16, error) {
 	return uint16(port), nil
 }
 
-func parseF5RemoteAddress(address net.Addr) netip.Addr {
-	if address == nil {
-		return netip.Addr{}
-	}
-	switch typedAddress := address.(type) {
-	case *net.TCPAddr:
-		parsed, _ := netip.AddrFromSlice(typedAddress.IP)
-		return parsed.Unmap()
-	case *net.UDPAddr:
-		parsed, _ := netip.AddrFromSlice(typedAddress.IP)
-		return parsed.Unmap()
-	}
-	host, _, splitErr := net.SplitHostPort(address.String())
-	if splitErr != nil {
-		return netip.Addr{}
-	}
-	parsed, parseErr := netip.ParseAddr(host)
-	if parseErr != nil {
-		return netip.Addr{}
-	}
-	return parsed.Unmap()
-}
-
 func f5UserAgent(client *Client) string {
 	if client.options.UserAgent != "" {
 		return client.options.UserAgent
@@ -738,7 +711,7 @@ func (s *f5SessionState) Close() error {
 			s.closeErr = activeSession.Close()
 		}
 		snapshot := s.snapshot()
-		if snapshot.serverURL != nil && snapshot.acceptedAddress.IsValid() && snapshot.jar != nil && snapshot.mrhSession != "" {
+		if snapshot.serverURL != nil && snapshot.jar != nil && snapshot.mrhSession != "" {
 			logoutContext, cancelLogout := context.WithTimeout(context.Background(), f5LogoutTimeout)
 			logoutErr := s.frontend.logout(logoutContext, snapshot)
 			cancelLogout()

@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/x509"
 	"io"
-	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptrace"
@@ -17,7 +16,6 @@ import (
 	"time"
 
 	E "github.com/sagernet/sing/common/exceptions"
-	M "github.com/sagernet/sing/common/metadata"
 
 	"golang.org/x/net/publicsuffix"
 )
@@ -493,7 +491,7 @@ func (a *ncAuthentication) doAuthenticationRequest(
 	var acceptedAddress netip.Addr
 	trace := &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
-			acceptedAddress = parseNCRemoteAddress(info.Conn.RemoteAddr())
+			acceptedAddress = a.frontend.client.connectionPeerAddress(info.Conn)
 		},
 	}
 	request = request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
@@ -753,7 +751,7 @@ func (s *ncSessionState) Close() error {
 			s.closeErr = activeSession.Close()
 		}
 		snapshot := s.snapshot()
-		if snapshot.serverURL != nil && snapshot.acceptedAddress.IsValid() && snapshot.jar != nil && snapshot.dsid != "" {
+		if snapshot.serverURL != nil && snapshot.jar != nil && snapshot.dsid != "" {
 			logoutContext, cancelLogout := context.WithTimeout(context.Background(), ncLogoutTimeout)
 			logoutErr := s.frontend.logout(logoutContext, snapshot)
 			cancelLogout()
@@ -857,21 +855,6 @@ func ncURLPort(serverURL *url.URL) (uint16, error) {
 		return 0, E.New("URL has an invalid port")
 	}
 	return uint16(port), nil
-}
-
-func parseNCRemoteAddress(address net.Addr) netip.Addr {
-	if address == nil {
-		return netip.Addr{}
-	}
-	switch address.(type) {
-	case *net.TCPAddr, *net.UDPAddr:
-	default:
-		_, _, err := net.SplitHostPort(address.String())
-		if err != nil {
-			return netip.Addr{}
-		}
-	}
-	return M.SocksaddrFromNet(address).Addr.Unmap()
 }
 
 func ncUserAgent(client *Client) string {

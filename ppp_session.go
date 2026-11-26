@@ -261,7 +261,7 @@ func (s *pppSession) controlLoop(link *pppLink, usingDTLS bool) {
 			checkSourceIP := s.checkSourceIP
 			initialSourceIP := s.initialSourceIP
 			s.access.RUnlock()
-			if checkSourceIP && initialSourceIP.IsValid() && carrier.localSourceIP != initialSourceIP {
+			if checkSourceIP && initialSourceIP.IsValid() && carrier.localSourceIP.IsValid() && carrier.localSourceIP != initialSourceIP {
 				_ = carrier.connection.Close()
 				s.terminate(ErrSessionRejected)
 				return

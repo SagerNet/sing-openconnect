@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"encoding/xml"
 	"io"
-	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptrace"
@@ -829,7 +828,7 @@ func (a *anyConnectAuthentication) doAuthenticationRequest(
 		var peerCertificate *x509.Certificate
 		trace := &httptrace.ClientTrace{
 			GotConn: func(info httptrace.GotConnInfo) {
-				authenticatedAddress = parseAnyConnectRemoteAddress(info.Conn.RemoteAddr())
+				authenticatedAddress = a.frontend.client.connectionPeerAddress(info.Conn)
 				tlsConnection, isTLS := info.Conn.(*tls.Conn)
 				if isTLS {
 					connectionState := tlsConnection.ConnectionState()
@@ -1180,21 +1179,6 @@ func anyConnectUserAgent(client *Client) string {
 		return client.options.UserAgent
 	}
 	return "AnyConnect-compatible OpenConnect VPN Agent " + defaultClientVersion
-}
-
-func parseAnyConnectRemoteAddress(address net.Addr) netip.Addr {
-	if address == nil {
-		return netip.Addr{}
-	}
-	host, _, err := net.SplitHostPort(address.String())
-	if err != nil {
-		return netip.Addr{}
-	}
-	parsed, parseErr := netip.ParseAddr(strings.Trim(host, "[]"))
-	if parseErr != nil {
-		return netip.Addr{}
-	}
-	return parsed.Unmap()
 }
 
 func anyConnectRedirectStatus(statusCode int) bool {
