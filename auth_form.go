@@ -423,8 +423,10 @@ func validateBrowserRequest(request *BrowserRequest) (browserAuthenticationMode,
 		return browserAuthenticationModeCallback, nil
 	}
 	if cookieMode {
-		if request.FinalURL == "" || len(request.CookieNames) == 0 || len(request.CallbackURLPrefixes) != 0 || len(request.HeaderNames) != 0 {
-			return 0, E.New("openconnect cookie browser request requires only a final URL and cookie names")
+		// Without a final URL, the browser completes once it holds every
+		// requested cookie.
+		if len(request.CookieNames) == 0 || len(request.CallbackURLPrefixes) != 0 || len(request.HeaderNames) != 0 {
+			return 0, E.New("openconnect cookie browser request requires only cookie names and an optional final URL")
 		}
 		if invalidStringList(request.CookieNames, false) {
 			return 0, E.New("openconnect cookie browser request contains an empty or duplicate cookie name")
@@ -487,6 +489,9 @@ func validateBrowserResponse(
 				return E.Errors(ErrInvalidBrowserAuthentication, E.New("browser result contains a duplicate cookie"))
 			}
 			seenCookieNames[cookie.Name] = struct{}{}
+		}
+		if request.FinalURL == "" && len(seenCookieNames) != len(request.CookieNames) {
+			return E.Errors(ErrInvalidBrowserAuthentication, E.New("browser result omitted a requested cookie"))
 		}
 		return nil
 	case browserAuthenticationModeHeaders:
