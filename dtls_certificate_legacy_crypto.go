@@ -103,13 +103,12 @@ func verifyCertificateDTLS10Peer(
 	}
 	if tlsConfig.VerifyConnection != nil {
 		err = tlsConfig.VerifyConnection(tls.ConnectionState{
-			Version:                    tls.VersionTLS11,
-			HandshakeComplete:          false,
-			CipherSuite:                cipherSuite,
-			NegotiatedProtocolIsMutual: true,
-			ServerName:                 serverName,
-			PeerCertificates:           append([]*x509.Certificate(nil), certificates...),
-			VerifiedChains:             cloneCertificateChains(verifiedChains),
+			Version:           tls.VersionTLS11,
+			HandshakeComplete: false,
+			CipherSuite:       cipherSuite,
+			ServerName:        serverName,
+			PeerCertificates:  append([]*x509.Certificate(nil), certificates...),
+			VerifiedChains:    cloneCertificateChains(verifiedChains),
 		})
 		if err != nil {
 			return nil, nil, E.Cause(err, "verify certificate DTLS 1.0 connection")

@@ -210,14 +210,13 @@ func connectCertificateDTLS12(
 		options = append(options, dtls.WithVerifyConnection(func(state *dtls.State) error {
 			verificationAccess.Lock()
 			connectionState := tls.ConnectionState{
-				Version:                    tls.VersionTLS12,
-				HandshakeComplete:          false,
-				CipherSuite:                uint16(state.CipherSuiteID),
-				NegotiatedProtocol:         state.NegotiatedProtocol,
-				NegotiatedProtocolIsMutual: true,
-				ServerName:                 serverName,
-				PeerCertificates:           append([]*x509.Certificate(nil), peerCertificates...),
-				VerifiedChains:             cloneCertificateChains(verifiedChains),
+				Version:            tls.VersionTLS12,
+				HandshakeComplete:  false,
+				CipherSuite:        uint16(state.CipherSuiteID),
+				NegotiatedProtocol: state.NegotiatedProtocol,
+				ServerName:         serverName,
+				PeerCertificates:   append([]*x509.Certificate(nil), peerCertificates...),
+				VerifiedChains:     cloneCertificateChains(verifiedChains),
 			}
 			verificationAccess.Unlock()
 			verifyErr := tlsConfig.VerifyConnection(connectionState)
